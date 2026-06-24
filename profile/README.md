@@ -26,18 +26,18 @@ We design and ship production agentic systems: multi-agent orchestration with re
 
 ## Open Source
 
-### [Lantern — `pi-code-orchestrator`](https://github.com/Palmetto-Interactive-LLC/pi-code-orchestrator)
+### [Lantern](https://github.com/Palmetto-Interactive-LLC/Lantern)
 
-[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/Palmetto-Interactive-LLC/pi-code-orchestrator/blob/main/LICENSE)
-[![CI](https://github.com/Palmetto-Interactive-LLC/pi-code-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/Palmetto-Interactive-LLC/pi-code-orchestrator/actions/workflows/ci.yml)
-[![Issues](https://img.shields.io/github/issues/Palmetto-Interactive-LLC/pi-code-orchestrator)](https://github.com/Palmetto-Interactive-LLC/pi-code-orchestrator/issues)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/Palmetto-Interactive-LLC/Lantern/blob/main/LICENSE)
+[![CI](https://github.com/Palmetto-Interactive-LLC/Lantern/actions/workflows/ci.yml/badge.svg)](https://github.com/Palmetto-Interactive-LLC/Lantern/actions/workflows/ci.yml)
+[![Issues](https://img.shields.io/github/issues/Palmetto-Interactive-LLC/Lantern)](https://github.com/Palmetto-Interactive-LLC/Lantern/issues)
 
 A self-contained Rust binary that orchestrates squads of AI coding agents on your local machine — no cloud dependency, no credentials required.
 
 Lantern runs as an MCP server, local terminal orchestrator, and Temporal client. It manages iTerm2 panes, git worktrees, agent-to-agent communication, and session state so you can run a coordinated team of specialized AI agents (architecture, security, data, UI, ops, QA, docs) against any codebase.
 
-**→ [README & Quick Start](https://github.com/Palmetto-Interactive-LLC/pi-code-orchestrator#readme)**  
-**→ [Issues & Roadmap](https://github.com/Palmetto-Interactive-LLC/pi-code-orchestrator/issues)**
+**→ [README & Quick Start](https://github.com/Palmetto-Interactive-LLC/Lantern#readme)**  
+**→ [Issues & Roadmap](https://github.com/Palmetto-Interactive-LLC/Lantern/issues)**
 
 ---
 

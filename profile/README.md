@@ -1,8 +1,6 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/Palmetto-Interactive-LLC/main-website/main/public/palmetto-wordmark.png" alt="Palmetto Interactive" width="300">
-
-# Palmetto Interactive
+<img src="palmetto-wordmark.png" alt="Palmetto Interactive" width="300">
 
 **Agentic AI, built porchside.**
 

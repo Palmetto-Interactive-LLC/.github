@@ -45,9 +45,9 @@ Lantern runs as an MCP server, local terminal orchestrator, and Temporal client.
 
 ## Platform Products
 
-**membl** — persistent, portable memory for developers and AI agents. Local-first Rust daemon with hybrid knowledge graph, ~12ms recall, and hooks for Claude Code, Codex, and Cursor. *(in development)*
+**[membl](https://membl.io)** — persistent, portable memory for developers and AI agents. Local-first Rust daemon with hybrid knowledge graph, ~12ms recall, and hooks for Claude Code, Codex, and Cursor. *(in development)*
 
-**membl Studio** — spec-driven engineering OS with collision-proof worktrees, Tauri desktop + CLI, and provider-agnostic agents. *(research preview)*
+**[membl Studio](https://membl.io)** — spec-driven engineering OS with collision-proof worktrees, Tauri desktop + CLI, and provider-agnostic agents. *(research preview)*
 
 ---
 

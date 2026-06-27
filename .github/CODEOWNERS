@@ -1,0 +1,6 @@
+# CODEOWNERS is advisory in this template.
+# Branch rulesets should not require code-owner review unless the repository
+# intentionally moves away from the no-human-review model.
+#
+# Replace this with the generated repository's solo maintainer.
+* @matt-palmetto

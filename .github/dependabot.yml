@@ -9,6 +9,8 @@ updates:
       time: "09:00"
       timezone: America/New_York
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
     groups:
       github-actions-minor-patch:
         update-types:
@@ -24,6 +26,8 @@ updates:
       time: "09:15"
       timezone: America/New_York
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
     groups:
       docker-minor-patch:
         update-types:
@@ -39,6 +43,8 @@ updates:
       time: "09:30"
       timezone: America/New_York
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
     groups:
       npm-minor-patch:
         update-types:

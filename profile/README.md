@@ -4,7 +4,7 @@
 
 **Developer tools for agentic software teams, built porchside.**
 
-Charleston-based AI studio building agentic developer tools, multi-agent orchestration, and custom AI products.
+Charleston-based AI studio building agentic developer tools, multi-agent orchestration, and custom AI products.  Helping small businesses enter the AI revolution.
 
 [palmettointeractive.com](https://palmettointeractive.com) · [info@palmettointeractive.com](mailto:info@palmettointeractive.com)
 

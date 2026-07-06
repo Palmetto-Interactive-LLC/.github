@@ -67,14 +67,6 @@ Sweetgrass pairs a Next.js interface with a Rust server so teams can inspect Bea
 
 ---
 
-## Hosted Developer Tools
-
-**[membl](https://membl.io)** — the Palmetto developer tools portal. Hosted versions of our tools, including Tide and Marsh, will become available there as they are ready for teams. *(in development)*
-
-**Tide** — structured agent-loop execution and run history for moving from ad hoc prompts to repeatable developer workflows. *(hosted product in development)*
-
----
-
 <div align="center">
 
 Built in the open from Charleston, SC · 32.78°N 79.93°W

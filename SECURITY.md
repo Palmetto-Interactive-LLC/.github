@@ -20,14 +20,15 @@ section with their own supported version policy.
 ## Coordinating Fixes
 
 Security reports may be tracked privately in GitHub Security Advisories and in
-Beads for implementation coordination. Public GitHub issues are appropriate for
-non-sensitive bugs and feature requests. Do not copy exploit details, secrets,
-customer data, or private advisory content into public issues or Beads records.
+an appropriately access-controlled Linear issue for implementation
+coordination. Public GitHub issues are appropriate for non-sensitive bugs and
+feature requests. Do not copy exploit details, secrets, customer data, or
+private advisory content into public issues or ordinary Linear issues.
 
 ## Baseline Expectations
 
 - Use signed commits for protected branches.
 - Keep deploy credentials out of GitHub secrets when OIDC is available.
-- Use GitHub issue forms for public intake and Beads for durable internal task
+- Use GitHub issue forms for public intake and Linear for durable internal task
   tracking.
 - Rotate any exposed credential immediately and document the incident privately.

@@ -269,11 +269,11 @@ sync_deployment_policies staging branch:main
 put_environment production
 sync_deployment_policies production 'tag:v*'
 
-ensure_label type:bug d73a4a 'Reproducible defect; mirrors Beads type bug.'
-ensure_label type:feature a2eeef 'New capability or behavior change; mirrors Beads type feature.'
-ensure_label type:epic 5319e7 'Large body of related work; mirrors Beads type epic.'
-ensure_label type:issue cfd3d7 'General human-reported work item; mirrors Beads type task.'
-ensure_label needs-triage ffb347 'Needs review before conversion into Beads work.'
+ensure_label type:bug d73a4a 'Reproducible defect.'
+ensure_label type:feature a2eeef 'New capability or behavior change.'
+ensure_label type:epic 5319e7 'Large body of related work.'
+ensure_label type:issue cfd3d7 'General human-reported work item.'
+ensure_label needs-triage ffb347 'Needs review and routing into Linear.'
 
 cat <<SUMMARY
 

@@ -1,23 +1,24 @@
 # Contributing
 
-## Issues And Beads
+## Issues And Work Tracking
 
 Use GitHub issues for external intake that is safe to share in the repository.
 The supported human-facing types are **Bug**, **Feature**, **Epic**, and
-**Issue**; see [docs/ISSUE-TRACKING.md](docs/ISSUE-TRACKING.md) for the exact
-GitHub label to Beads type mapping.
+**Issue**; see [docs/ISSUE-TRACKING.md](docs/ISSUE-TRACKING.md) for the triage
+and routing conventions.
 
-Use Beads (`bd`) for durable implementation tracking inside the repo. When a
-GitHub issue becomes implementation work, link the GitHub issue from the Beads
-record or mention the Beads ID in the pull request. Do not edit
-`.beads/issues.jsonl` directly.
+Use Linear for durable planning and implementation tracking. Internal product
+work belongs in the Palmetto Interactive workspace; client delivery belongs in
+the Palmetto Interactive Clients workspace. When a GitHub issue becomes
+implementation work, link it to the Linear issue and assign that issue to the
+correct project. Keep that project associated with its governing initiative.
 
 Never place vulnerability details, secrets, customer data, or private incident
 notes in public GitHub issues.
 
 ## Pull Requests
 
-1. Start from an issue or Beads item when possible.
+1. Start from a Linear issue or linked GitHub issue when possible.
 2. Create a branch from `main`.
 3. Use signed commits.
 4. Keep history linear and changes focused.
@@ -29,14 +30,5 @@ notes in public GitHub issues.
 `CODEOWNERS` documents ownership only. It is not intended to be a required
 approval gate in the default no-human-review setup.
 
-## Local Beads Commands
-
-```bash
-bd ready
-bd show <id>
-bd update <id> --claim
-bd close <id> --reason="Completed"
-```
-
-Use GitHub issues for user-facing intake and Beads for work that must survive
-handoff between local sessions.
+Keep the Linear issue's status, owner, priority, project, initiative, and pull
+request links current throughout implementation and closeout.

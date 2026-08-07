@@ -37,7 +37,7 @@ A self-contained Rust binary that orchestrates squads of AI coding agents on you
 Lantern runs as an MCP server, local terminal orchestrator, and Temporal client. It manages iTerm2 panes, git worktrees, agent-to-agent communication, and session state so you can run a coordinated team of specialized AI agents (architecture, security, data, UI, ops, QA, docs) against any codebase.
 
 **→ [README & Quick Start](https://github.com/Palmetto-Interactive-LLC/Lantern#readme)**
-**→ [Issues & Roadmap](https://github.com/Palmetto-Interactive-LLC/Lantern/issues)**
+**→ [Report an Issue](https://github.com/Palmetto-Interactive-LLC/Lantern/issues)**
 
 ### [Marsh](https://github.com/Palmetto-Interactive-LLC/Marsh)
 
@@ -50,7 +50,7 @@ An MIT-licensed elastic runner platform for GitHub Actions. Marsh keeps GitHub a
 Marsh is built for teams that want clean self-hosted runner labels without owning a long-lived runner fleet: JIT runner registration, one-job sandboxes, cache-aware runner images, and automatic teardown.
 
 **→ [README & Quick Start](https://github.com/Palmetto-Interactive-LLC/Marsh#readme)**
-**→ [Issues & Roadmap](https://github.com/Palmetto-Interactive-LLC/Marsh/issues)**
+**→ [Report an Issue](https://github.com/Palmetto-Interactive-LLC/Marsh/issues)**
 
 ### [Sweetgrass](https://github.com/Palmetto-Interactive-LLC/Sweetgrass)
 
@@ -58,12 +58,12 @@ Marsh is built for teams that want clean self-hosted runner labels without ownin
 [![CI](https://github.com/Palmetto-Interactive-LLC/Sweetgrass/actions/workflows/ci.yml/badge.svg)](https://github.com/Palmetto-Interactive-LLC/Sweetgrass/actions/workflows/ci.yml)
 [![Issues](https://img.shields.io/github/issues/Palmetto-Interactive-LLC/Sweetgrass)](https://github.com/Palmetto-Interactive-LLC/Sweetgrass/issues)
 
-An MIT-licensed visual workspace for Beads issue tracking. Sweetgrass is a heavily extended fork of the Beads Kanban UI, rebuilt into a polished developer workspace for local repositories, Git-aware task flow, agent notes, and project navigation.
+An MIT-licensed visual project layer for local repositories, combining Git-aware task flow, agent notes, timelines, and project navigation in one developer workspace.
 
-Sweetgrass pairs a Next.js interface with a Rust server so teams can inspect Beads-backed work, epics, timelines, agents, and repo state without leaving the local development loop.
+Sweetgrass pairs a Next.js interface with a Rust server so teams can inspect work, epics, timelines, agents, and repository state without leaving the local development loop.
 
 **→ [README & Quick Start](https://github.com/Palmetto-Interactive-LLC/Sweetgrass#readme)**
-**→ [Issues & Roadmap](https://github.com/Palmetto-Interactive-LLC/Sweetgrass/issues)**
+**→ [Report an Issue](https://github.com/Palmetto-Interactive-LLC/Sweetgrass/issues)**
 
 ---
 

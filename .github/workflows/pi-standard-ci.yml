@@ -15,7 +15,7 @@ concurrency:
 jobs:
   lint:
     name: lint
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, daytona, large]
     permissions:
       contents: read
     steps:
@@ -73,7 +73,7 @@ jobs:
 
   build-test:
     name: build-test
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, daytona, large]
     permissions:
       contents: read
     steps:

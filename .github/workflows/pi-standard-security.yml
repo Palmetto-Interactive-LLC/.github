@@ -28,7 +28,7 @@ env:
 jobs:
   secrets-scan:
     name: secrets-scan
-    runs-on: [self-hosted, daytona, large]
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
@@ -71,7 +71,7 @@ jobs:
 
   sast:
     name: sast
-    runs-on: [self-hosted, daytona, large]
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
@@ -115,7 +115,7 @@ jobs:
 
   deps-scan:
     name: deps-scan
-    runs-on: [self-hosted, daytona, large]
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
@@ -193,7 +193,7 @@ jobs:
 
   iac-scan:
     name: iac-scan
-    runs-on: [self-hosted, daytona, large]
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
@@ -259,7 +259,7 @@ jobs:
 
   actions-lint:
     name: actions-lint
-    runs-on: [self-hosted, daytona, large]
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
@@ -302,7 +302,7 @@ jobs:
 
   scorecard:
     name: scorecard
-    runs-on: [self-hosted, daytona, large]
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       checks: read

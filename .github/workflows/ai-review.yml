@@ -32,7 +32,7 @@ jobs:
           persist-credentials: false
 
       - name: Claude PR review
-        uses: anthropics/claude-code-action@4633baf5267540f3f8cb58b684f79901d564c280 # v1.0.160
+        uses: anthropics/claude-code-action@e5ad3c7725bc2459721893f88879fef9dbcf97b0 # v1.0.202
         with:
           # Default path: generated locally with `claude setup-token`, backed by
           # the developer's Claude Pro/Max subscription rather than API-key billing.

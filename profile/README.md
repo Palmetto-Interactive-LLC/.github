@@ -65,6 +65,19 @@ Sweetgrass pairs a Next.js interface with a Rust server so teams can inspect wor
 **→ [README & Quick Start](https://github.com/Palmetto-Interactive-LLC/Sweetgrass#readme)**
 **→ [Report an Issue](https://github.com/Palmetto-Interactive-LLC/Sweetgrass/issues)**
 
+### [Boardwalk](https://github.com/Palmetto-Interactive-LLC/boardwalk)
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/Palmetto-Interactive-LLC/boardwalk/blob/main/LICENSE)
+[![CI](https://github.com/Palmetto-Interactive-LLC/boardwalk/actions/workflows/build.yml/badge.svg)](https://github.com/Palmetto-Interactive-LLC/boardwalk/actions/workflows/build.yml)
+[![Issues](https://img.shields.io/github/issues/Palmetto-Interactive-LLC/boardwalk)](https://github.com/Palmetto-Interactive-LLC/boardwalk/issues)
+
+A small, free Mac app for controlling Bluetooth under-desk walking treadmills. On, off, faster, slower and set speed, with live speed and a menu bar readout.
+
+Boardwalk speaks the standard Bluetooth Fitness Machine Service (FTMS) through CoreBluetooth in a single Swift file with no dependencies, and adds `boardwalk://` links for Shortcuts and other automation.
+
+**→ [README & Quick Start](https://github.com/Palmetto-Interactive-LLC/boardwalk#readme)**
+**→ [Report an Issue](https://github.com/Palmetto-Interactive-LLC/boardwalk/issues)**
+
 ---
 
 <div align="center">

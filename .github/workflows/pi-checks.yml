@@ -375,7 +375,9 @@ jobs:
             echo "No workflows to lint."
             exit 0
           fi
-          actionlint -color=false
+          # Marsh runner labels are custom to our fleet; declare them known so
+          # actionlint still catches typos in every other label.
+          actionlint -color=false -ignore 'label "(daytona|large)" is unknown'
           zizmor --min-severity high --no-progress .github/workflows
 
   # The single required status check. Fails unless every job above succeeded.

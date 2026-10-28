@@ -173,9 +173,12 @@ jobs:
       IN_BUILD: ${{ inputs.build-command }}
       WORKDIR: ${{ inputs.working-directory }}
     steps:
+      # Depth 2 on a pull request: HEAD^1 is the base branch tip, so a repo's own
+      # phase commands can diff against it without a credentialed fetch.
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          fetch-depth: ${{ inputs.mode == 'pr' && '2' || '1' }}
           persist-credentials: false
 
       # Cache package downloads (not node_modules or build output) so a repeat

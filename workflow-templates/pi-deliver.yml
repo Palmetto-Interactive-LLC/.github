@@ -21,7 +21,7 @@ jobs:
     permissions:
       contents: write # the shared workflow's release job asks for it; staging never uses it
       id-token: write
-    uses: Palmetto-Interactive-LLC/.github/.github/workflows/pi-deliver.yml@__PIN__ # v1
+    uses: Palmetto-Interactive-LLC/.github/.github/workflows/pi-deliver.yml@98107731fcbf68c5703cb6af833cbb488ed6c3b2 # v1
     with:
       app: __APP__
       cluster: __CLUSTER__

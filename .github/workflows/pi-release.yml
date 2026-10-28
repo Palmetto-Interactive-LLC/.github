@@ -200,8 +200,13 @@ jobs:
           echo "mode=release" >> "$GITHUB_OUTPUT"
           if test -z "$RELEASE_SHA"; then echo "sha=" >> "$GITHUB_OUTPUT"; exit 0; fi
           [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be a full 40-character commit SHA."; exit 1; }
-          rel="$(curl -fsS -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${GITHUB_REPOSITORY}/compare/${RELEASE_SHA}...main" | jq -r '.status')"
-          case "$rel" in identical|ahead) ;; *) echo "::error::${RELEASE_SHA} is not on main (compare says '${rel}')."; exit 1;; esac
+          code="$(curl -sS -o "$RUNNER_TEMP/compare.json" -w '%{http_code}' -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${GITHUB_REPOSITORY}/compare/${RELEASE_SHA}...main")"
+          case "$code" in
+            200) rel="$(jq -r '.status' "$RUNNER_TEMP/compare.json")" ;;
+            404|422) echo "::error::commit ${RELEASE_SHA} is not on main (GitHub does not know it)."; exit 1 ;;
+            *) echo "::error::Could not check ${RELEASE_SHA} against main (HTTP ${code})."; exit 1 ;;
+          esac
+          case "$rel" in identical|ahead) ;; *) echo "::error::commit ${RELEASE_SHA} is not on main (compare says '${rel}')."; exit 1;; esac
           echo "sha=${RELEASE_SHA}" >> "$GITHUB_OUTPUT"
 
   gates:

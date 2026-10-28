@@ -229,8 +229,13 @@ jobs:
           set -euo pipefail
           [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be a full 40-character commit SHA."; exit 1; }
           api="https://api.github.com/repos/${SOURCE_REPOSITORY}"
-          rel="$(curl -fsS -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "${api}/compare/${RELEASE_SHA}...main" | jq -r '.status')"
-          case "$rel" in identical|ahead) ;; *) echo "::error::${RELEASE_SHA} is not on main (compare says '${rel}')."; exit 1;; esac
+          code="$(curl -sS -o "$RUNNER_TEMP/compare.json" -w '%{http_code}' -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "${api}/compare/${RELEASE_SHA}...main")"
+          case "$code" in
+            200) rel="$(jq -r '.status' "$RUNNER_TEMP/compare.json")" ;;
+            404|422) echo "::error::commit ${RELEASE_SHA} is not on main (GitHub does not know it)."; exit 1 ;;
+            *) echo "::error::Could not check ${RELEASE_SHA} against main (HTTP ${code})."; exit 1 ;;
+          esac
+          case "$rel" in identical|ahead) ;; *) echo "::error::commit ${RELEASE_SHA} is not on main (compare says '${rel}')."; exit 1;; esac
           echo "Releasing ${RELEASE_SHA} (head of main is ${GITHUB_SHA})."
           echo "SOURCE_SHA=${RELEASE_SHA}" >> "$GITHUB_ENV"
 
@@ -302,7 +307,7 @@ jobs:
               echo "::notice::${repo}:${SOURCE_SHA} already exists in ECR; reusing it."
             elif grep -q ImageNotFoundException "$err"; then
               if test "$MODE" != "staging"; then
-                echo "::error::${repo}:${SOURCE_SHA} is not in ECR. A ${MODE} never builds. For a release, let the staging deploy of this commit finish first; for a rollback the image may have expired."; exit 1
+                echo "::error::no image for ${SOURCE_SHA}: ${repo}:${SOURCE_SHA} is not in ECR. A ${MODE} never builds. For a release, let the staging deploy of this commit finish first; for a rollback the image may have expired."; exit 1
               fi
               echo "::group::Build ${repo} (linux/arm64)"
               labels=(--label "org.opencontainers.image.revision=${SOURCE_SHA}"

@@ -90,6 +90,7 @@ Inputs: `app`, `cluster` (both required), `mode`, `runner-build`, `runner-small`
 | `images` | `[{"name":"web","dockerfile":"Dockerfile","context":"."}]` | JSON list of `{name, dockerfile, context[, container]}`. ECR repository is `<app>/<name>`. |
 | `services` | `[app]` | JSON list of service app names. Each runs as `<service>-<env>`. |
 | `container-name` | `web` | Main container. The image named `web` goes here. |
+| `has-staging` | `true` | `false` for an app with no staging services (Membl, Marsh): a merge to `main` only builds and pushes the image, nothing deploys, and a release skips the staging-digest check. Prod still deploys only from a manual release. |
 | `migrate-command` | none | Pre-deploy migration (below). |
 | `migrate-secrets` | none | `{"<env>": {"ENV_VAR": "<secret name or ARN>"}}` for the migration task only. |
 | `stable-timeout-minutes` | `15` | Per environment. |

@@ -121,6 +121,10 @@ on:
         description: Extra heavy gate for a release (IaC and policy checks, cost gates, integration suites). Runs after the standard release phases, in the working directory. Empty or "-" skips it.
         type: string
         default: ''
+      has-staging:
+        description: "true (default): the app has staging services. false: no staging environment; a merge only builds the image and a release skips the staging-digest check."
+        type: boolean
+        default: true
       deploy:
         description: "true (default): deploy prod through pi-deliver. false: gates plus a release tag only, for repositories with no ECS service (pi-platform)."
         type: boolean
@@ -183,6 +187,7 @@ jobs:
     uses: ./.github/workflows/pi-deliver.yml
     with:
       mode: ${{ needs.mode.outputs.mode }}
+      has-staging: ${{ inputs.has-staging }}
       app: ${{ inputs.app }}
       cluster: ${{ inputs.cluster }}
       runner-build: ${{ inputs.runner-build }}

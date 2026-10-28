@@ -2,8 +2,10 @@
 # everywhere: the final "pi-checks" job. See README.md ("CI/CD standard").
 #
 # Reusable workflows run on the CALLER's runners, so every job takes its
-# runs-on from the runner-small input. Callers pass their CodeBuild ARM label:
-#   codebuild-pi-platform-runner-<project>-${{ github.run_id }}-${{ github.run_attempt }}-arm-3.0-small
+# runs-on from the runner-small input: a JSON array of labels read with
+# fromJSON. The default is the Marsh (Daytona) fleet, so callers normally pass
+# nothing. Marsh runners are x86_64 today and arm64 after the Daytona v2 move;
+# the tool installers below pick the right binary for either.
 #
 # Every caller-supplied value reaches a shell through env:, never inline in run:.
 name: PI Checks
@@ -13,10 +15,10 @@ on:
     inputs:
       runner-small:
         description: >-
-          runs-on for every job. A plain label, or a JSON array of labels when
-          starting with "[".
+          runs-on for every job, as a JSON array of labels. Defaults to the
+          Marsh (Daytona) runners.
         type: string
-        required: true
+        default: '["self-hosted","daytona"]'
       stack:
         description: "Toolchain and default commands: node | python | go | rust | tofu | docs"
         type: string
@@ -73,7 +75,7 @@ env:
 jobs:
   quick:
     name: quick
-    runs-on: ${{ startsWith(inputs.runner-small, '[') && fromJSON(inputs.runner-small) || inputs.runner-small }}
+    runs-on: ${{ fromJSON(inputs.runner-small) }}
     timeout-minutes: 30
     permissions:
       contents: read
@@ -224,7 +226,7 @@ jobs:
 
   secrets:
     name: secrets
-    runs-on: ${{ startsWith(inputs.runner-small, '[') && fromJSON(inputs.runner-small) || inputs.runner-small }}
+    runs-on: ${{ fromJSON(inputs.runner-small) }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -260,7 +262,7 @@ jobs:
 
   deps:
     name: deps
-    runs-on: ${{ startsWith(inputs.runner-small, '[') && fromJSON(inputs.runner-small) || inputs.runner-small }}
+    runs-on: ${{ fromJSON(inputs.runner-small) }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -328,7 +330,7 @@ jobs:
 
   actions:
     name: actions
-    runs-on: ${{ startsWith(inputs.runner-small, '[') && fromJSON(inputs.runner-small) || inputs.runner-small }}
+    runs-on: ${{ fromJSON(inputs.runner-small) }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -373,7 +375,9 @@ jobs:
             echo "No workflows to lint."
             exit 0
           fi
-          actionlint -color=false
+          # Marsh runner labels are custom to our fleet; declare them known so
+          # actionlint still catches typos in every other label.
+          actionlint -color=false -ignore 'label "(daytona|large)" is unknown'
           zizmor --min-severity high --no-progress .github/workflows
 
   # The single required status check. Fails unless every job above succeeded.
@@ -381,7 +385,7 @@ jobs:
     name: pi-checks
     if: always()
     needs: [quick, secrets, deps, actions]
-    runs-on: ${{ startsWith(inputs.runner-small, '[') && fromJSON(inputs.runner-small) || inputs.runner-small }}
+    runs-on: ${{ fromJSON(inputs.runner-small) }}
     timeout-minutes: 5
     permissions: {}
     env:

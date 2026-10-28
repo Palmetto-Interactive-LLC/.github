@@ -116,6 +116,17 @@ on:
         type: number
         default: 10
 
+    outputs:
+      version:
+        description: The release tag (release mode) or sha-<12>.
+        value: ${{ jobs.build.outputs.version }}
+      sha:
+        description: The commit whose image was deployed or released.
+        value: ${{ jobs.build.outputs.sha }}
+      image_digest:
+        description: Digest of the first image.
+        value: ${{ jobs.build.outputs.image_digest }}
+
 permissions: {}
 
 # One delivery per repository at a time. Queued runs wait; a running deploy is
@@ -139,12 +150,18 @@ jobs:
     outputs:
       images: ${{ steps.build.outputs.images }}
       version: ${{ steps.version.outputs.version }}
+      sha: ${{ steps.target.outputs.sha }}
+      image_digest: ${{ steps.target.outputs.image_digest }}
     env:
       APP: ${{ inputs.app }}
       IMAGES_INPUT: ${{ inputs.images }}
       SOURCE_SHA: ${{ github.sha }}
       SOURCE_REPOSITORY: ${{ github.repository }}
       MODE: ${{ inputs.mode }}
+      # Release of an explicit commit: the caller's workflow_dispatch input "sha"
+      # (a full commit SHA on main). Empty means the head of main.
+      RELEASE_SHA: ${{ inputs.mode == 'release' && github.event.inputs.sha || '' }}
+      DRY_RUN: ${{ inputs.mode == 'release' && github.event.inputs.dry_run || 'false' }}
       # Rollback: a workflow_dispatch whose caller declares the inputs rollback_to
       # (a release tag vYYYY.MM.DD.N or a full commit SHA) and rollback_env
       # (staging or prod), read only in mode=rollback. Empty otherwise.
@@ -202,6 +219,20 @@ jobs:
           case "$rel" in identical|ahead) ;; *) echo "::error::${target} is not on main (compare says '${rel}')."; exit 1;; esac
           echo "Rolling ${ROLLBACK_ENV} back to ${ROLLBACK_TO} (${target})."
           echo "SOURCE_SHA=${target}" >> "$GITHUB_ENV"
+
+      - name: Resolve the release commit
+        if: env.RELEASE_SHA != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be a full 40-character commit SHA."; exit 1; }
+          api="https://api.github.com/repos/${SOURCE_REPOSITORY}"
+          rel="$(curl -fsS -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "${api}/compare/${RELEASE_SHA}...main" | jq -r '.status')"
+          case "$rel" in identical|ahead) ;; *) echo "::error::${RELEASE_SHA} is not on main (compare says '${rel}')."; exit 1;; esac
+          echo "Releasing ${RELEASE_SHA} (head of main is ${GITHUB_SHA})."
+          echo "SOURCE_SHA=${RELEASE_SHA}" >> "$GITHUB_ENV"
 
       - name: Validate release identity
         shell: bash
@@ -433,12 +464,22 @@ jobs:
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "Version: ${version}"
 
+      - name: Export the target commit and digest
+        id: target
+        shell: bash
+        env:
+          BUILT: ${{ steps.build.outputs.images }}
+        run: |
+          set -euo pipefail
+          echo "sha=${SOURCE_SHA}" >> "$GITHUB_OUTPUT"
+          echo "image_digest=$(jq -r '.[0].digest // empty' <<<"$BUILT")" >> "$GITHUB_OUTPUT"
+
   # Release mode only: the annotated tag and GitHub Release, cut after the gates
   # and before prod is touched. contents: write lives on this job alone.
   release:
     name: Cut release
     needs: build
-    if: inputs.mode == 'release'
+    if: inputs.mode == 'release' && github.event.inputs.dry_run != 'true'
     runs-on: ${{ fromJSON(inputs.runner-small) }}
     timeout-minutes: 15
     permissions:
@@ -446,7 +487,8 @@ jobs:
     env:
       IMAGES: ${{ needs.build.outputs.images }}
       VERSION: ${{ needs.build.outputs.version }}
-      SOURCE_SHA: ${{ github.sha }}
+      SOURCE_SHA: ${{ needs.build.outputs.sha }}
+      RELEASE_SHA: ${{ github.event.inputs.sha }}
       DEPLOY_ENV: release
       MODE: ${{ inputs.mode }}
     steps:
@@ -462,6 +504,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          if test -n "$RELEASE_SHA"; then
+            echo "::notice::Releasing the explicit commit ${RELEASE_SHA}; no head check."
+            echo "stale=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
           ref="${GITHUB_REF#refs/}"
           head=""
           for try in 1 2 3 4 5; do
@@ -557,7 +603,7 @@ jobs:
     name: Deploy ${{ matrix.env }}
     needs: [build, release]
     # release is skipped outside release mode; a failed or cancelled release stops prod.
-    if: ${{ !cancelled() && needs.build.result == 'success' && (needs.release.result == 'success' || needs.release.result == 'skipped') && (inputs.has-staging || inputs.mode != 'staging') }}
+    if: ${{ !cancelled() && needs.build.result == 'success' && (needs.release.result == 'success' || needs.release.result == 'skipped') && (inputs.has-staging || inputs.mode != 'staging') && github.event.inputs.dry_run != 'true' }}
     runs-on: ${{ fromJSON(inputs.runner-small) }}
     timeout-minutes: 90
     permissions:
@@ -571,6 +617,8 @@ jobs:
         env: ${{ inputs.mode == 'rollback' && fromJSON(format('["{0}"]', github.event.inputs.rollback_env)) || (inputs.mode == 'release' && fromJSON('["prod"]') || fromJSON('["staging"]')) }}
     env:
       MODE: ${{ inputs.mode }}
+      RELEASE_SHA: ${{ inputs.mode == 'release' && github.event.inputs.sha || '' }}
+      TARGET_SHA: ${{ needs.build.outputs.sha }}
       ROLLBACK_TO: ${{ inputs.mode == 'rollback' && github.event.inputs.rollback_to || '' }}
       APP: ${{ inputs.app }}
       CLUSTER: ${{ inputs.cluster }}
@@ -599,6 +647,10 @@ jobs:
           set -euo pipefail
           if test "$MODE" = "rollback"; then
             echo "::notice::Rollback to ${ROLLBACK_TO} requested through workflow_dispatch; no head check."
+            echo "stale=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if test -n "$RELEASE_SHA"; then
+            echo "::notice::Releasing the explicit commit ${RELEASE_SHA}; no head check."
             echo "stale=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
           ref="${GITHUB_REF#refs/}"
@@ -635,11 +687,13 @@ jobs:
           role-session-name: pi-deliver-${{ matrix.env }}-${{ github.run_id }}
           role-to-assume: ${{ vars.ECS_DEPLOY_ROLE_ARN }}
 
+      # A release of the head promotes what staging already runs. An explicit older
+      # sha is a deliberate choice, so the staging check does not apply to it.
       # A release promotes what staging already runs. If staging is on another
       # digest (a newer merge, a rollback, a failed staging deploy), stop: the
       # gates and the scan ran on an image nobody has exercised.
       - name: Require staging to run this exact image
-        if: steps.guard.outputs.stale != 'true' && env.MODE == 'release' && inputs.has-staging
+        if: steps.guard.outputs.stale != 'true' && env.MODE == 'release' && inputs.has-staging && env.TARGET_SHA == github.sha
         shell: bash
         run: |
           set -euo pipefail

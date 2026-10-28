@@ -11,6 +11,16 @@
 #   With the dispatch input rollback_to set, gates and the release are skipped
 #   and pi-deliver redeploys that existing image to rollback_env instead.
 #
+# The caller's workflow_dispatch declares these optional inputs (the templates do):
+#   sha          full commit SHA on main to release; default is main's head. Its
+#                already-built image is released, so the SHA must be on main and
+#                its image must exist in ECR. A non-head SHA is a deliberate choice.
+#   requested_by free text (the Slack release button puts the requester here).
+#   dry_run      true: only the heavy gates and the ECR scan of the image; no tag,
+#                no deploy, no notification.
+#   rollback_to / rollback_env: the rollback path.
+# Outputs (and the notify job): release_url, release_tag, app_url, image_digest, run_url.
+#
 # deploy: false (pi-platform and other repos with no ECS service) runs the gates
 # and cuts the release tag with nothing to deploy.
 #
@@ -125,10 +135,31 @@ on:
         description: "true (default): the app has staging services. false: no staging environment; a merge only builds the image and a release skips the staging-digest check."
         type: boolean
         default: true
+      app-url:
+        description: "The production URL reported as app_url. Empty falls back to the APP_URL repository variable."
+        type: string
+        default: ""
       deploy:
         description: "true (default): deploy prod through pi-deliver. false: gates plus a release tag only, for repositories with no ECS service (pi-platform)."
         type: boolean
         default: true
+    outputs:
+      release_url:
+        description: URL of the GitHub Release (empty for a dry run or rollback).
+        value: ${{ jobs.notify.outputs.release_url }}
+      release_tag:
+        description: The release tag vYYYY.MM.DD.N (empty for a dry run or rollback).
+        value: ${{ jobs.notify.outputs.release_tag }}
+      app_url:
+        description: The production URL.
+        value: ${{ jobs.notify.outputs.app_url }}
+      image_digest:
+        description: Digest of the released (or rolled back) image.
+        value: ${{ jobs.notify.outputs.image_digest }}
+      run_url:
+        description: URL of this workflow run.
+        value: ${{ jobs.notify.outputs.run_url }}
+
 permissions: {}
 
 jobs:
@@ -136,9 +167,13 @@ jobs:
     name: mode
     runs-on: ${{ fromJSON(inputs.runner-small) }}
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      contents: read
     outputs:
       mode: ${{ steps.mode.outputs.mode }}
+      sha: ${{ steps.mode.outputs.sha }}
+      dry_run: ${{ steps.mode.outputs.dry_run }}
+      requested_by: ${{ steps.mode.outputs.requested_by }}
     steps:
       - name: Only a manual run from main may release
         id: mode
@@ -146,12 +181,28 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           ROLLBACK_TO: ${{ github.event.inputs.rollback_to }}
+          RELEASE_SHA: ${{ github.event.inputs.sha }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          REQUESTED_BY: ${{ github.event.inputs.requested_by }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if test "$EVENT_NAME" != "workflow_dispatch" || test "$GITHUB_REF" != "refs/heads/main"; then
             echo "::error::Create Release runs only as a workflow_dispatch on refs/heads/main (this is ${EVENT_NAME} on ${GITHUB_REF})."; exit 1
           fi
-          if test -n "$ROLLBACK_TO"; then echo "mode=rollback" >> "$GITHUB_OUTPUT"; else echo "mode=release" >> "$GITHUB_OUTPUT"; fi
+          {
+            echo "dry_run=$(test "$DRY_RUN" = "true" && echo true || echo false)"
+            printf 'requested_by=%s\n' "$(printf '%s' "$REQUESTED_BY" | tr -d '\r\n' | cut -c1-200)"
+          } >> "$GITHUB_OUTPUT"
+          if test -n "$ROLLBACK_TO"; then
+            echo "mode=rollback" >> "$GITHUB_OUTPUT"; echo "sha=" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "mode=release" >> "$GITHUB_OUTPUT"
+          if test -z "$RELEASE_SHA"; then echo "sha=" >> "$GITHUB_OUTPUT"; exit 0; fi
+          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be a full 40-character commit SHA."; exit 1; }
+          rel="$(curl -fsS -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${GITHUB_REPOSITORY}/compare/${RELEASE_SHA}...main" | jq -r '.status')"
+          case "$rel" in identical|ahead) ;; *) echo "::error::${RELEASE_SHA} is not on main (compare says '${rel}')."; exit 1;; esac
+          echo "sha=${RELEASE_SHA}" >> "$GITHUB_OUTPUT"
 
   gates:
     name: Heavy gates
@@ -162,6 +213,7 @@ jobs:
     uses: ./.github/workflows/pi-checks.yml
     with:
       mode: release
+      ref: ${{ needs.mode.outputs.sha }}
       runner-small: ${{ inputs.runner-small }}
       stack: ${{ inputs.stack }}
       working-directory: ${{ inputs.working-directory }}
@@ -204,17 +256,21 @@ jobs:
   tag:
     name: Cut release
     needs: [mode, gates]
-    if: ${{ !inputs.deploy && needs.mode.outputs.mode == 'release' && needs.gates.result == 'success' }}
+    if: ${{ !inputs.deploy && needs.mode.outputs.mode == 'release' && needs.mode.outputs.dry_run != 'true' && needs.gates.result == 'success' }}
     runs-on: ${{ fromJSON(inputs.runner-small) }}
     timeout-minutes: 15
     permissions:
       contents: write
+    outputs:
+      version: ${{ steps.cut.outputs.version }}
     steps:
       - name: Cut the release (annotated tag and GitHub Release)
+        id: cut
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ needs.mode.outputs.sha || github.sha }}
+          EXPLICIT_SHA: ${{ needs.mode.outputs.sha }}
           SOURCE_REPOSITORY: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -235,7 +291,9 @@ jobs:
           # Head check: a release is always of the head of main.
           req GET "${api}/git/ref/heads/main"
           head="$(jq -r '.object.sha // empty' <<<"$body")"
-          test "$head" = "$SOURCE_SHA" || { echo "::error::${SOURCE_SHA} is not the head of main (${head})."; exit 1; }
+          if test -z "$EXPLICIT_SHA"; then
+            test "$head" = "$SOURCE_SHA" || { echo "::error::${SOURCE_SHA} is not the head of main (${head})."; exit 1; }
+          fi
           # Version: reuse the tag this commit already has, else the next vYYYY.MM.DD.N.
           req GET "${api}/tags?per_page=100"
           existing="$(jq -r --arg sha "$SOURCE_SHA" '[.[] | select(.commit.sha == $sha and (.name | test("^v[0-9]{4}[.][0-9]{2}[.][0-9]{2}[.][0-9]+$")))][0].name // empty' <<<"$body")"
@@ -269,4 +327,108 @@ jobs:
           else
             echo "::error::Unexpected HTTP ${code} reading release ${VERSION}: ${body:0:300}"; exit 1
           fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "### Release ${VERSION} (${SOURCE_SHA})" >> "$GITHUB_STEP_SUMMARY"
+
+  # Always runs, success or failure, once everything else has finished. It sets
+  # the workflow outputs and tells the release bot (Slack #client-releases) how
+  # the run ended. Nothing here can fail the release: the notification steps are
+  # continue-on-error, and the job is skipped for dry runs.
+  notify:
+    name: Notify
+    needs: [mode, gates, deliver, tag]
+    if: ${{ always() && needs.mode.outputs.dry_run != 'true' }}
+    runs-on: ${{ fromJSON(inputs.runner-small) }}
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+    outputs:
+      release_url: ${{ steps.result.outputs.release_url }}
+      release_tag: ${{ steps.result.outputs.release_tag }}
+      app_url: ${{ steps.result.outputs.app_url }}
+      image_digest: ${{ steps.result.outputs.image_digest }}
+      run_url: ${{ steps.result.outputs.run_url }}
+    env:
+      NOTIFY_ROLE_ARN: ${{ vars.PI_RELEASE_NOTIFY_ROLE_ARN }}
+    steps:
+      - name: Work out the result
+        id: result
+        shell: bash
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          APP_URL_INPUT: ${{ inputs.app-url }}
+          APP_URL_VAR: ${{ vars.APP_URL }}
+          RELEASE_SHA: ${{ needs.mode.outputs.sha }}
+          REQUESTED_BY: ${{ needs.mode.outputs.requested_by }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          results="$(jq -r '[.[].result] | join(" ")' <<<"$NEEDS")"
+          conclusion=success
+          case " $results " in *" failure "*) conclusion=failure;; *" cancelled "*) conclusion=cancelled;; esac
+          mode="$(jq -r '.mode.outputs.mode // "release"' <<<"$NEEDS")"
+          [ -n "$mode" ] || mode=release
+          tag=""
+          if test "$mode" = "release"; then
+            tag="$(jq -r '(.deliver.outputs.version // .tag.outputs.version // "")' <<<"$NEEDS")"
+            case "$tag" in v[0-9]*) ;; *) tag="";; esac
+          fi
+          release_url=""
+          if test -n "$tag"; then release_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${tag}"; fi
+          app_url="${APP_URL_INPUT:-$APP_URL_VAR}"
+          digest="$(jq -r '.deliver.outputs.image_digest // ""' <<<"$NEEDS")"
+          sha="$(jq -r '.deliver.outputs.sha // ""' <<<"$NEEDS")"
+          [ -n "$sha" ] || sha="${RELEASE_SHA:-$GITHUB_SHA}"
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          {
+            echo "conclusion=${conclusion}"; echo "mode=${mode}"; echo "sha=${sha}"
+            echo "release_tag=${tag}"; echo "release_url=${release_url}"; echo "app_url=${app_url}"
+            echo "image_digest=${digest}"; echo "run_url=${run_url}"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Create Release: ${conclusion} (${mode})"
+            echo "- Commit: \`${sha}\`"
+            test -z "$tag" || echo "- Release: ${release_url}"
+            test -z "$digest" || echo "- Image: \`${digest}\`"
+            test -z "$REQUESTED_BY" || echo "- Requested by: ${REQUESTED_BY}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: No release notifier configured
+        if: ${{ env.NOTIFY_ROLE_ARN == '' }}
+        shell: bash
+        run: echo "::warning::PI_RELEASE_NOTIFY_ROLE_ARN is not set for this repository; no Slack notification."
+
+      - name: Configure AWS credentials through GitHub OIDC (release notify)
+        if: ${{ env.NOTIFY_ROLE_ARN != '' }}
+        continue-on-error: true
+        uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
+        with:
+          aws-region: us-east-1
+          role-session-name: pi-release-notify-${{ github.run_id }}
+          role-to-assume: ${{ vars.PI_RELEASE_NOTIFY_ROLE_ARN }}
+
+      - name: Tell the release bot
+        if: ${{ env.NOTIFY_ROLE_ARN != '' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          CONCLUSION: ${{ steps.result.outputs.conclusion }}
+          MODE: ${{ steps.result.outputs.mode }}
+          SHA: ${{ steps.result.outputs.sha }}
+          REQUESTED_BY: ${{ needs.mode.outputs.requested_by }}
+          RELEASE_TAG: ${{ steps.result.outputs.release_tag }}
+          RELEASE_URL: ${{ steps.result.outputs.release_url }}
+          APP_URL: ${{ steps.result.outputs.app_url }}
+          IMAGE_DIGEST: ${{ steps.result.outputs.image_digest }}
+          RUN_URL: ${{ steps.result.outputs.run_url }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          payload="$(jq -nc \
+            --arg repository "$GITHUB_REPOSITORY" --arg run_id "$GITHUB_RUN_ID" --arg run_attempt "$RUN_ATTEMPT" \
+            --arg conclusion "$CONCLUSION" --arg mode "$MODE" --arg sha "$SHA" --arg requested_by "$REQUESTED_BY" \
+            --arg release_tag "$RELEASE_TAG" --arg release_url "$RELEASE_URL" --arg app_url "$APP_URL" \
+            --arg image_digest "$IMAGE_DIGEST" --arg run_url "$RUN_URL" \
+            '{action:"release_result", repository:$repository, run_id:$run_id, run_attempt:$run_attempt, conclusion:$conclusion, mode:$mode, sha:$sha, requested_by:$requested_by, release_tag:$release_tag, release_url:$release_url, app_url:$app_url, image_digest:$image_digest, run_url:$run_url}')"
+          aws lambda invoke --function-name pi-release-notify --cli-binary-format raw-in-base64-out --payload "$payload" "$RUNNER_TEMP/notify.json" >/dev/null
+          echo "Release bot notified (${CONCLUSION})."

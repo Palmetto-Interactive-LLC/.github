@@ -3,8 +3,9 @@
 # gates (full tests, dependency audit, secret history scan, workflow lint,
 # release-gate-command), checks the ECR scan of the image staging is running,
 # cuts the tag vYYYY.MM.DD.N and the GitHub Release, and deploys that same
-# digest to prod with the migration. To roll back instead, fill rollback_to
-# and rollback_env.
+# digest to prod with the migration. sha releases an older commit on main
+# instead of the head; dry_run stops after the gates and the scan. To roll back
+# instead, fill rollback_to and rollback_env.
 # Keep the workflow name exactly "Create Release" and the trigger workflow_dispatch only.
 # Replace __APP__, __CLUSTER__ and the stack. Mirror the `with:` of pi-deliver.yml.
 name: Create Release
@@ -12,6 +13,18 @@ name: Create Release
 on:
   workflow_dispatch:
     inputs:
+      sha:
+        description: "Optional full commit SHA on main to release. Empty releases the head of main. The commit's already-built staging image is what ships."
+        required: false
+        default: ""
+      requested_by:
+        description: "Optional free text: who asked for this release (the Slack release button fills it in)."
+        required: false
+        default: ""
+      dry_run:
+        description: "Run only the heavy gates and the ECR scan of the image. No tag, no deploy."
+        type: boolean
+        default: false
       rollback_to:
         description: "Leave empty to release the head of main. To roll back instead: a release tag (vYYYY.MM.DD.N) or full commit SHA on main."
         required: false

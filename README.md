@@ -4,8 +4,8 @@ Organization defaults, plus the CI/CD standard every active repo follows (Linear
 
 ## CI/CD standard
 
-1. Every GitHub Actions job runs on an AWS CodeBuild-hosted GitHub Actions runner on ARM. Not GitHub-hosted, not Marsh/Daytona.
-2. ECS hosts are Graviton. Images build natively for `linux/arm64` on those runners.
+1. Every GitHub Actions job runs on our Marsh runners: `runs-on: [self-hosted, daytona]`, or `[self-hosted, daytona, large]` for image builds and heavy tests. Not GitHub-hosted, not CodeBuild. Marsh runners are x86_64 Daytona sandboxes today. The Palmetto fleet moves to Daytona v2 arm64 later, and only the runner label changes then.
+2. ECS hosts are Graviton, so images are `linux/arm64`. On the x86_64 Marsh runners they build with `docker buildx` under QEMU (`docker/setup-qemu-action`).
 3. `main` takes changes only through pull requests: 0 required approvals, no bypass actors, squash-only, auto-merge on, branch deleted on merge.
 4. One set of workflows, defined here:
    - Pull requests and `main`: `pi-checks` (quick checks, secrets, dependencies, workflow lint).
@@ -22,19 +22,16 @@ This repository is public, so any repository in the organization can call these 
 | `.github/workflows/pi-checks.yml` | Checks. Jobs `quick`, `secrets`, `deps`, `actions`, and the aggregate `pi-checks`. |
 | `.github/workflows/pi-deliver.yml` | Build, ECR, staging, release, prod. |
 
-Reusable workflows run on the caller's runners, so every job takes `runs-on` from an input:
+Reusable workflows run on the caller's runners, so every job takes `runs-on` from an input. Each input is a JSON array of labels, read with `fromJSON`, and defaults to the Marsh fleet. Callers normally pass nothing:
 
-- `runner-small`: checks and deploy jobs. Pass the repo's CodeBuild label with the small size.
-- `runner-build`: image builds. Pass the medium or large size.
+| Input | Workflow | Default |
+|---|---|---|
+| `runner-small` | `pi-checks`, `pi-deliver` (deploy jobs) | `'["self-hosted","daytona"]'` |
+| `runner-build` | `pi-deliver` (image build) | `'["self-hosted","daytona","large"]'` |
 
-Label form (single label with the image and size override, from the AWS docs):
+The fleet is defined in pi-platform `k8s/apps/marsh/20-configmap-palmetto.yaml` (snapshots `pi-runner-{default,large}-v9`). When the Palmetto fleet moves to Daytona v2 arm64, change the defaults here and nothing else.
 
-```
-codebuild-pi-platform-runner-<project>-${{ github.run_id }}-${{ github.run_attempt }}-arm-3.0-small
-codebuild-pi-platform-runner-<project>-${{ github.run_id }}-${{ github.run_attempt }}-arm-3.0-medium
-```
-
-`<project>` is the runner name in pi-platform (`local.codebuild_runners`); the CodeBuild project is `pi-platform-runner-<project>`. Each project serves one repository. A value starting with `[` is read as a JSON array of labels.
+The Marsh runner group (`daytona`) is limited to selected private repositories. A repo not in that group queues forever, so add it to the group before adopting the workflows. Public repositories are not allowed in the group; they use a GitHub-hosted runner with a TODO.
 
 Workflow templates for new repositories are in `workflow-templates/` (Actions, New workflow, organization section).
 
@@ -50,7 +47,7 @@ uses: Palmetto-Interactive-LLC/.github/.github/workflows/pi-checks.yml@<40-char 
 
 ## pi-checks
 
-Inputs: `runner-small` (required), `stack` (`node` default, `python`, `go`, `rust`, `tofu`, `docs`), `working-directory`, `node-version`, `python-version`, `go-version` (empty reads `go.mod`), `rust-toolchain`, `tofu-version`, and `install-command`, `lint-command`, `typecheck-command`, `test-command`, `build-command`. A command input replaces the stack default for that phase; `-` skips the phase.
+Inputs: `runner-small`, `stack` (`node` default, `python`, `go`, `rust`, `tofu`, `docs`), `working-directory`, `node-version`, `python-version`, `go-version` (empty reads `go.mod`), `rust-toolchain`, `tofu-version`, and `install-command`, `lint-command`, `typecheck-command`, `test-command`, `build-command`. A command input replaces the stack default for that phase; `-` skips the phase.
 
 Stack defaults run only what the repo defines. For `node` the package manager comes from the lockfile and a phase is skipped when `package.json` has no script by that name.
 
@@ -68,7 +65,7 @@ Rulesets: `rulesets/main.json` still lists the legacy contexts (`build-test`, `l
 
 ## pi-deliver
 
-Inputs: `app`, `cluster`, `runner-build`, `runner-small` (all required), plus:
+Inputs: `app`, `cluster` (both required), `runner-build`, `runner-small`, plus:
 
 | Input | Default | Meaning |
 |---|---|---|
@@ -86,7 +83,7 @@ Repository variables, set by pi-platform: `ECS_DEPLOY_ENABLED` (`true` turns del
 
 Flow:
 
-1. Build. For each image: skip if `<app>/<name>:<full sha>` already exists in ECR, otherwise `docker buildx build --platform linux/arm64 --provenance=false --sbom=false` and push. The digest is read back from ECR and promoted to every environment. The build job refuses to run on a non-ARM runner.
+1. Build. For each image: skip if `<app>/<name>:<full sha>` already exists in ECR, otherwise `docker buildx build --platform linux/arm64 --provenance=false --sbom=false` (QEMU on x86_64 runners) and push. The job fails if the image in ECR is not arm64. The digest is read back from ECR and promoted to every environment.
 2. Per environment, in order: register a new task-definition revision per service with the image digest and `SENTRY_RELEASE=<release tag>`, run the migration if set, `update-service`, then wait. A container gets the new image if its name matches the image's container or its current image is that ECR repository.
 3. The wait is a poll, not `aws ecs wait services-stable`: it requires the PRIMARY deployment of the revision just registered to reach `COMPLETED` with running equal to desired, and fails on `FAILED` (circuit-breaker rollback). ALB health is part of that. Default 15 minutes.
 4. After the first environment is stable: compute `vYYYY.MM.DD.N` (UTC day, `N` continues from existing tags; a re-run of the same commit reuses its tag), create the annotated tag and the GitHub Release (notes plus image digests).

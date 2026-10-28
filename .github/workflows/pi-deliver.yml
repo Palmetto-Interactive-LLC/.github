@@ -149,6 +149,16 @@ jobs:
         with:
           mask-password: true
 
+      # Authenticated pulls from public.ecr.aws (base images such as
+      # public.ecr.aws/docker/library/node). Anonymous pulls from the shared
+      # runner IPs hit 429 Too Many Requests. Same role; it needs
+      # ecr-public:GetAuthorizationToken and sts:GetServiceBearerToken.
+      - name: Log in to Amazon ECR Public
+        uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2.1.6
+        with:
+          registry-type: public
+          mask-password: true
+
       - name: Build and push arm64 images (skipped when the SHA tag exists)
         id: build
         shell: bash

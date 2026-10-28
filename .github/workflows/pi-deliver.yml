@@ -120,11 +120,45 @@ jobs:
       IMAGES_INPUT: ${{ inputs.images }}
       SOURCE_SHA: ${{ github.sha }}
       SOURCE_REPOSITORY: ${{ github.repository }}
+      # Rollback: a workflow_dispatch whose caller declares the inputs rollback_to
+      # (a release tag vYYYY.MM.DD.N or a full commit SHA) and rollback_env
+      # (staging or prod). Empty in every other run.
+      ROLLBACK_TO: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.rollback_to || '' }}
+      ROLLBACK_ENV: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.rollback_env || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
+
+      # Rollback redeploys an image that already exists in ECR. Nothing is built.
+      # The target must be a release tag or commit that is on main, so only code
+      # that went through main's checks can be rolled to. From here on SOURCE_SHA
+      # is the target commit, not the commit this run started on.
+      - name: Resolve the rollback target
+        if: env.ROLLBACK_TO != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ENVIRONMENTS: ${{ inputs.environments }}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/${SOURCE_REPOSITORY}"
+          get() { curl -fsS -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "$@"; }
+          jq -e --arg e "$ROLLBACK_ENV" 'index($e) != null' <<<"$ENVIRONMENTS" >/dev/null \
+            || { echo "::error::rollback_env must be one of ${ENVIRONMENTS}."; exit 1; }
+          if [[ "$ROLLBACK_TO" =~ ^[0-9a-f]{40}$ ]]; then
+            target="$ROLLBACK_TO"
+          elif [[ "$ROLLBACK_TO" =~ ^v[0-9]{4}[.][0-9]{2}[.][0-9]{2}[.][0-9]+$ ]]; then
+            target="$(get "${api}/commits/${ROLLBACK_TO}" | jq -r '.sha // empty')"
+          else
+            echo "::error::rollback_to must be a release tag (vYYYY.MM.DD.N) or a full 40-character commit SHA."; exit 1
+          fi
+          [[ "$target" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Could not resolve ${ROLLBACK_TO} to a commit."; exit 1; }
+          rel="$(get "${api}/compare/${target}...main" | jq -r '.status')"
+          case "$rel" in identical|ahead) ;; *) echo "::error::${target} is not on main (compare says '${rel}')."; exit 1;; esac
+          echo "Rolling ${ROLLBACK_ENV} back to ${ROLLBACK_TO} (${target})."
+          echo "SOURCE_SHA=${target}" >> "$GITHUB_ENV"
 
       - name: Validate release identity
         shell: bash
@@ -193,6 +227,9 @@ jobs:
             if aws ecr describe-images --repository-name "$repo" --image-ids "imageTag=${SOURCE_SHA}" --region "$AWS_REGION" >/dev/null 2>"$err"; then
               echo "::notice::${repo}:${SOURCE_SHA} already exists in ECR; reusing it."
             elif grep -q ImageNotFoundException "$err"; then
+              if test -n "$ROLLBACK_TO"; then
+                echo "::error::${repo}:${SOURCE_SHA} is not in ECR (expired or never built). A rollback does not rebuild."; exit 1
+              fi
               echo "::group::Build ${repo} (linux/arm64)"
               labels=(--label "org.opencontainers.image.revision=${SOURCE_SHA}"
                       --label "org.opencontainers.image.source=https://github.com/${SOURCE_REPOSITORY}")
@@ -226,6 +263,7 @@ jobs:
       # environment is touched. Registry scanning is BASIC with scan on push;
       # an image reused from an earlier run keeps the scan from its first push.
       - name: Gate on the ECR image scan (fail on CRITICAL findings)
+        if: env.ROLLBACK_TO == ''
         shell: bash
         env:
           BUILT: ${{ steps.build.outputs.images }}
@@ -335,6 +373,9 @@ jobs:
             '[.[] | select(.commit.sha == $sha and (.name | test("^v[0-9]{4}[.][0-9]{2}[.][0-9]{2}[.][0-9]+$")))][0].name // empty')"
           if test -n "$existing"; then
             version="$existing"
+          elif test -n "$ROLLBACK_TO"; then
+            # a rollback never cuts a new release number
+            if [[ "$ROLLBACK_TO" =~ ^v[0-9]{4}[.][0-9]{2}[.][0-9]{2}[.][0-9]+$ ]]; then version="$ROLLBACK_TO"; else version="sha-${SOURCE_SHA:0:12}"; fi
           else
             prefix="v$(date -u +%Y.%m.%d)."
             last="$(get "${api}/git/matching-refs/tags/${prefix}" | jq -r --arg p "refs/tags/${prefix}" \
@@ -359,8 +400,11 @@ jobs:
       max-parallel: 1
       fail-fast: true
       matrix:
-        env: ${{ fromJSON(inputs.environments) }}
+        # A rollback touches one environment; the build job has already checked
+        # that rollback_env is in the environments list.
+        env: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.rollback_to != '') && fromJSON(format('["{0}"]', github.event.inputs.rollback_env)) || fromJSON(inputs.environments) }}
     env:
+      ROLLBACK_TO: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.rollback_to || '' }}
       APP: ${{ inputs.app }}
       CLUSTER: ${{ inputs.cluster }}
       DEPLOY_ENV: ${{ matrix.env }}
@@ -378,18 +422,17 @@ jobs:
       # with the current head of the branch it ran on. Not the head: skip every
       # later step and succeed. Deliveries are serialized per repository, so a
       # newer run that finished first is seen here. The only override is a
-      # workflow_dispatch whose caller declares a boolean input named
-      # "rollback" and sets it to true.
+      # rollback (workflow_dispatch with rollback_to), which deploys an older,
+      # already built image on purpose.
       - name: Skip when this commit is no longer the branch head
         id: guard
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          ROLLBACK: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.rollback == 'true' }}
         run: |
           set -euo pipefail
-          if test "$ROLLBACK" = "true"; then
-            echo "::notice::Rollback requested through workflow_dispatch; deploying ${SOURCE_SHA} without the head check."
+          if test -n "$ROLLBACK_TO"; then
+            echo "::notice::Rollback to ${ROLLBACK_TO} requested through workflow_dispatch; no head check."
             echo "stale=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
           ref="${GITHUB_REF#refs/}"
@@ -462,7 +505,7 @@ jobs:
           echo "deploy=${deploy}" >> "$GITHUB_OUTPUT"
 
       - name: Run pre-deploy migration
-        if: steps.guard.outputs.stale != 'true' && (inputs.migrate-command != '')
+        if: steps.guard.outputs.stale != 'true' && inputs.migrate-command != '' && env.ROLLBACK_TO == ''
         shell: bash
         env:
           DEPLOY: ${{ steps.register.outputs.deploy }}
@@ -577,7 +620,7 @@ jobs:
           done < <(jq -c '.[]' <<<"$DEPLOY")
 
       - name: Cut the release (annotated tag and GitHub Release)
-        if: steps.guard.outputs.stale != 'true' && (matrix.env == fromJSON(inputs.environments)[0])
+        if: steps.guard.outputs.stale != 'true' && env.ROLLBACK_TO == '' && matrix.env == fromJSON(inputs.environments)[0]
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}

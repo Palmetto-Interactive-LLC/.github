@@ -14,6 +14,12 @@ name: PI Checks
 on:
   workflow_call:
     inputs:
+      ref:
+        description: >-
+          Release mode only: the commit to check out and test (an explicit
+          release sha). Empty means the commit the run started on.
+        type: string
+        default: ""
       mode:
         description: >-
           pr (default): LIGHT checks for a pull request. Install, lint,
@@ -178,6 +184,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          ref: ${{ inputs.ref }}
           fetch-depth: ${{ inputs.mode == 'pr' && '2' || '1' }}
           persist-credentials: false
 
@@ -379,6 +386,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          ref: ${{ inputs.ref }}
           fetch-depth: ${{ inputs.mode == 'release' && '0' || '100' }}
           persist-credentials: false
 
@@ -426,6 +434,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
 
       - name: Install osv-scanner
@@ -496,6 +505,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
 
       - name: Set up Python

@@ -73,6 +73,15 @@ on:
         description: Main container name (receives the "web" image).
         type: string
         default: web
+      has-staging:
+        description: >-
+          true (default): the app has <service>-staging services. false: no
+          staging environment exists, so a merge to main only builds and pushes
+          the image to ECR (nothing is deployed) and a release skips the
+          "staging runs this digest" check. Prod still deploys only from a
+          manual release.
+        type: boolean
+        default: true
       mode:
         description: >-
           staging (default) | release | rollback. release and rollback deploy
@@ -548,7 +557,7 @@ jobs:
     name: Deploy ${{ matrix.env }}
     needs: [build, release]
     # release is skipped outside release mode; a failed or cancelled release stops prod.
-    if: ${{ !cancelled() && needs.build.result == 'success' && (needs.release.result == 'success' || needs.release.result == 'skipped') }}
+    if: ${{ !cancelled() && needs.build.result == 'success' && (needs.release.result == 'success' || needs.release.result == 'skipped') && (inputs.has-staging || inputs.mode != 'staging') }}
     runs-on: ${{ fromJSON(inputs.runner-small) }}
     timeout-minutes: 90
     permissions:
@@ -630,7 +639,7 @@ jobs:
       # digest (a newer merge, a rollback, a failed staging deploy), stop: the
       # gates and the scan ran on an image nobody has exercised.
       - name: Require staging to run this exact image
-        if: steps.guard.outputs.stale != 'true' && env.MODE == 'release'
+        if: steps.guard.outputs.stale != 'true' && env.MODE == 'release' && inputs.has-staging
         shell: bash
         run: |
           set -euo pipefail

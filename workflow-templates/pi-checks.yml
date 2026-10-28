@@ -1,0 +1,25 @@
+# Palmetto standard checks. Calls the central reusable workflow, which runs on
+# this repository's CodeBuild ARM runner. Replace __PROJECT__ with the
+# pi-platform runner name (the CodeBuild project is pi-platform-runner-__PROJECT__).
+# The required status check for main is "pi-checks / pi-checks", so keep the job id.
+name: PI Checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: pi-checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  pi-checks:
+    permissions:
+      contents: read
+    uses: Palmetto-Interactive-LLC/.github/.github/workflows/pi-checks.yml@7d9d54ff120d57604971279e0c6c496a035ca291 # v1
+    with:
+      stack: node # node | python | go | rust | tofu | docs
+      runner-small: codebuild-pi-platform-runner-__PROJECT__-${{ github.run_id }}-${{ github.run_attempt }}-arm-3.0-small

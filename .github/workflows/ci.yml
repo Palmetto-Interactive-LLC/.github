@@ -19,8 +19,3 @@ jobs:
     uses: ./.github/workflows/pi-checks.yml
     with:
       stack: docs
-      # TODO(PAL-1022): this repository is public, and the Marsh "daytona" runner
-      # group does not accept public repositories (allows_public_repositories is
-      # false). Run on a GitHub-hosted runner until that changes, then delete this
-      # input so the Marsh default applies.
-      runner-small: '["ubuntu-latest"]'

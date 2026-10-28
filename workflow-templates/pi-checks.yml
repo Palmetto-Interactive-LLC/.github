@@ -1,6 +1,6 @@
 # Palmetto standard checks. Calls the central reusable workflow, which runs on
-# the Marsh runners ([self-hosted, daytona]) by default. The repository must be
-# in the "daytona" runner group.
+# the GitHub-hosted ARM runner (ubuntu-24.04-arm). Do not override runner-small:
+# the label lives in the central workflow.
 # The required status check for main is "pi-checks / pi-checks", so keep the job id.
 name: PI Checks
 
@@ -22,4 +22,3 @@ jobs:
     uses: Palmetto-Interactive-LLC/.github/.github/workflows/pi-checks.yml@abe3c0163c0b14af64dc891428a03d72b7a599db # v1
     with:
       stack: node # node | python | go | rust | tofu | docs
-      # runner-small: '["self-hosted","daytona"]'  # the default; JSON array of labels

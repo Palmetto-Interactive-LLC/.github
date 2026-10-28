@@ -26,7 +26,7 @@ env:
 jobs:
   secrets-scan:
     name: secrets-scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
     steps:
@@ -40,8 +40,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          case "$(uname -m)" in
+            aarch64|arm64) arch=arm64 ;;
+            x86_64) arch=x64 ;;
+            *) echo "::error::Unsupported architecture $(uname -m)"; exit 1 ;;
+          esac
           mkdir -p "$RUNNER_TEMP/gitleaks" "$GITHUB_WORKSPACE/reports"
-          artifact="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          artifact="gitleaks_${GITLEAKS_VERSION}_linux_${arch}.tar.gz"
           base_url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
           curl -fsSLo "$RUNNER_TEMP/$artifact" "$base_url/$artifact"
           curl -fsSLo "$RUNNER_TEMP/gitleaks_checksums.txt" "$base_url/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
@@ -69,7 +74,7 @@ jobs:
 
   sast:
     name: sast
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
     steps:
@@ -113,7 +118,7 @@ jobs:
 
   deps-scan:
     name: deps-scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
     steps:
@@ -126,11 +131,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          case "$(uname -m)" in
+            aarch64|arm64) arch=arm64 ;;
+            x86_64) arch=amd64 ;;
+            *) echo "::error::Unsupported architecture $(uname -m)"; exit 1 ;;
+          esac
           mkdir -p "$RUNNER_TEMP/osv" "$GITHUB_WORKSPACE/reports"
           base_url="https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}"
-          curl -fsSLo "$RUNNER_TEMP/osv-scanner" "$base_url/osv-scanner_linux_amd64"
+          curl -fsSLo "$RUNNER_TEMP/osv-scanner" "$base_url/osv-scanner_linux_${arch}"
           curl -fsSLo "$RUNNER_TEMP/osv-scanner_SHA256SUMS" "$base_url/osv-scanner_SHA256SUMS"
-          grep "  osv-scanner_linux_amd64$" "$RUNNER_TEMP/osv-scanner_SHA256SUMS" | sed "s/osv-scanner_linux_amd64/osv-scanner/" | (cd "$RUNNER_TEMP" && sha256sum -c -)
+          grep "  osv-scanner_linux_${arch}$" "$RUNNER_TEMP/osv-scanner_SHA256SUMS" | sed "s/osv-scanner_linux_${arch}/osv-scanner/" | (cd "$RUNNER_TEMP" && sha256sum -c -)
           chmod +x "$RUNNER_TEMP/osv-scanner"
           mv "$RUNNER_TEMP/osv-scanner" "$RUNNER_TEMP/osv/osv-scanner"
           echo "$RUNNER_TEMP/osv" >> "$GITHUB_PATH"
@@ -139,8 +149,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          case "$(uname -m)" in
+            aarch64|arm64) arch=arm64 ;;
+            x86_64) arch=amd64 ;;
+            *) echo "::error::Unsupported architecture $(uname -m)"; exit 1 ;;
+          esac
           mkdir -p "$RUNNER_TEMP/grype"
-          artifact="grype_${GRYPE_VERSION}_linux_amd64.tar.gz"
+          artifact="grype_${GRYPE_VERSION}_linux_${arch}.tar.gz"
           base_url="https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}"
           curl -fsSLo "$RUNNER_TEMP/$artifact" "$base_url/$artifact"
           curl -fsSLo "$RUNNER_TEMP/grype_checksums.txt" "$base_url/grype_${GRYPE_VERSION}_checksums.txt"
@@ -191,7 +206,7 @@ jobs:
 
   iac-scan:
     name: iac-scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
     steps:
@@ -204,8 +219,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          case "$(uname -m)" in
+            aarch64|arm64) arch=ARM64 ;;
+            x86_64) arch=64bit ;;
+            *) echo "::error::Unsupported architecture $(uname -m)"; exit 1 ;;
+          esac
           mkdir -p "$RUNNER_TEMP/trivy" "$GITHUB_WORKSPACE/reports"
-          artifact="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          artifact="trivy_${TRIVY_VERSION}_Linux-${arch}.tar.gz"
           base_url="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
           curl -fsSLo "$RUNNER_TEMP/$artifact" "$base_url/$artifact"
           curl -fsSLo "$RUNNER_TEMP/trivy_checksums.txt" "$base_url/trivy_${TRIVY_VERSION}_checksums.txt"
@@ -257,7 +277,7 @@ jobs:
 
   actions-lint:
     name: actions-lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
     steps:
@@ -270,8 +290,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          case "$(uname -m)" in
+            aarch64|arm64) arch=arm64 ;;
+            x86_64) arch=amd64 ;;
+            *) echo "::error::Unsupported architecture $(uname -m)"; exit 1 ;;
+          esac
           mkdir -p "$RUNNER_TEMP/actionlint" "$GITHUB_WORKSPACE/reports"
-          artifact="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          artifact="actionlint_${ACTIONLINT_VERSION}_linux_${arch}.tar.gz"
           base_url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}"
           curl -fsSLo "$RUNNER_TEMP/$artifact" "$base_url/$artifact"
           curl -fsSLo "$RUNNER_TEMP/actionlint_checksums.txt" "$base_url/actionlint_${ACTIONLINT_VERSION}_checksums.txt"
@@ -300,7 +325,7 @@ jobs:
 
   scorecard:
     name: scorecard
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
       checks: read

@@ -1,6 +1,6 @@
 {
   "name": "PI Checks",
-  "description": "Palmetto standard pull-request checks on the Marsh runners: quick (lint, typecheck, test, build), secrets, dependencies, workflow lint, and the aggregate pi-checks gate.",
+  "description": "Palmetto standard pull-request checks on the GitHub-hosted ARM runner: quick (lint, typecheck, test, build), secrets, dependencies, workflow lint, and the aggregate pi-checks gate.",
   "iconName": "octicon checklist",
   "categories": ["Continuous integration"],
   "filePatterns": ["package.json$", "go.mod$", "Cargo.toml$", "pyproject.toml$", "requirements.txt$", "main.tf$"]

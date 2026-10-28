@@ -1,12 +1,13 @@
 # Palmetto standard delivery (reusable): on merge to main, build the arm64 image
-# once (docker buildx + QEMU emulation on the x86_64 Marsh runners), push it to
+# natively (docker buildx on the arm64 runner, no QEMU), push it to
 # ECR by full git SHA, deploy staging on ECS, wait for it to be stable, cut the
 # release (vYYYY.MM.DD.N), then deploy the SAME image digest to prod. See
 # README.md ("CI/CD standard").
 #
 # Reusable workflows run on the CALLER's runners, so every job takes its
-# runs-on from an input (a JSON array of labels, read with fromJSON). Defaults
-# are the Marsh (Daytona) fleet. The caller must grant:
+# runs-on from an input (a JSON array of labels, read with fromJSON). Both
+# default to the GitHub-hosted ARM runner (ubuntu-24.04-arm) and callers pass
+# nothing; this file is the one place the label lives. The caller must grant:
 #   permissions: { contents: write, id-token: write }
 # on the job that calls this workflow. The deploy role trust policy only accepts
 # the repository's main branch, so do not use GitHub "environment:" on the job
@@ -34,13 +35,14 @@ on:
       runner-build:
         description: >-
           runs-on for the image build, as a JSON array of labels. Defaults to
-          the large Marsh (Daytona) runner.
+          the GitHub-hosted ARM runner. Must be an arm64 runner with Docker.
+          Callers should not override it.
         type: string
-        default: '["self-hosted","daytona","large"]'
+        default: '["ubuntu-24.04-arm"]'
       runner-small:
         description: runs-on for the deploy jobs (same format as runner-build).
         type: string
-        default: '["self-hosted","daytona"]'
+        default: '["ubuntu-24.04-arm"]'
       images:
         description: >-
           JSON list of {name, dockerfile, context[, container]}. name is the ECR
@@ -120,18 +122,17 @@ jobs:
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::The image tag must be the full 40-character commit SHA."; exit 1; }
           test -n "$AWS_ROLE_ARN" || { echo "::error::Set the PI_PLATFORM_IMAGE_PUSH_ROLE_ARN repository variable."; exit 1; }
           docker version --format '{{.Server.Version}}' >/dev/null \
-            || { echo "::error::No Docker daemon on this runner. runner-build must be a Marsh runner with Docker."; exit 1; }
+            || { echo "::error::No Docker daemon on this runner. runner-build must be an arm64 runner with Docker."; exit 1; }
+          case "$(uname -m)" in
+            aarch64|arm64) ;;
+            *) echo "::error::runner-build is $(uname -m). ECS hosts are Graviton, so images build natively on an arm64 runner."; exit 1 ;;
+          esac
           jq -e 'type == "array" and length > 0 and all(.[]; has("name") and has("dockerfile") and has("context"))' <<<"$IMAGES_INPUT" >/dev/null \
             || { echo "::error::images must be a JSON list of {name, dockerfile, context}."; exit 1; }
 
-      # ECS hosts are Graviton. Marsh runners are x86_64 today, so arm64 images
-      # are cross-built under QEMU. On an arm64 runner QEMU is a no-op and the
-      # build is native. Same approach as palmettointeractive.com container-ecr.yml.
-      - name: Set up QEMU (arm64 emulation)
-        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
-        with:
-          platforms: arm64
-
+      # ECS hosts are Graviton and the runner is arm64, so the build is native:
+      # no QEMU. The architecture check in "Validate release identity" fails the
+      # job if a caller points runner-build at an x86_64 runner.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
 

@@ -92,6 +92,8 @@ Inputs: `app`, `cluster` (both required), `runner-build`, `runner-small`, plus:
 
 The calling job needs `permissions: { contents: write, id-token: write }` and must not use a GitHub `environment:` (it changes the OIDC subject the deploy role trusts).
 
+**Stale runs never deploy.** Each deploy job first compares the run's commit with the current head of its branch (GitHub API). If they differ (a re-run of an old run, or an older run that was queued behind a newer one), every later step is skipped, with a notice, and the job succeeds. The only override is a `workflow_dispatch` whose caller declares a boolean input `rollback` and sets it true. A rollback to an older image also needs a caller that dispatches it; the build job still requires the `main` ref.
+
 Repository variables, set by pi-platform: `ECS_DEPLOY_ENABLED` (`true` turns delivery on; otherwise the workflow does nothing), `PI_PLATFORM_IMAGE_PUSH_ROLE_ARN` (ECR push, build job), `ECS_DEPLOY_ROLE_ARN` (deploy jobs).
 
 Flow:

@@ -545,31 +545,67 @@ jobs:
         run: |
           set -euo pipefail
           api="https://api.github.com/repos/${SOURCE_REPOSITORY}"
-          call() { curl -sS -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "$@"; }
-          status="$(call -o /dev/null -w '%{http_code}' "${api}/git/ref/tags/${VERSION}")"
-          if test "$status" = "404"; then
-            tag_sha="$(call -X POST "${api}/git/tags" -d "$(jq -nc --arg tag "$VERSION" --arg sha "$SOURCE_SHA" \
-              '{tag:$tag, message:("Release " + $tag), object:$sha, type:"commit"}')" | jq -r '.sha // empty')"
-            test -n "$tag_sha" || { echo "::error::Could not create tag object ${VERSION}."; exit 1; }
-            call -f -o /dev/null -X POST "${api}/git/refs" -d "$(jq -nc --arg ref "refs/tags/${VERSION}" --arg sha "$tag_sha" '{ref:$ref, sha:$sha}')"
-            echo "Created tag ${VERSION}"
-          elif test "$status" = "200"; then
-            echo "Tag ${VERSION} already exists."
+          # Every GitHub call retries 403/429/5xx (secondary rate limits surface as
+          # 403) and prints the response body on failure, so a bad run says why.
+          # Sets $code and $body. Callers decide what each code means.
+          req() {
+            local method="$1" url="$2" data="${3:-}" try
+            for try in 1 2 3 4 5; do
+              if test -n "$data"; then
+                body="$(curl -sS -X "$method" -w '\n%{http_code}' -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "$url" -d "$data")"
+              else
+                body="$(curl -sS -X "$method" -w '\n%{http_code}' -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "$url")"
+              fi
+              code="${body##*$'\n'}"; body="${body%$'\n'*}"
+              case "$code" in 403|429|500|502|503|504) echo "::warning::${method} ${url} returned ${code} (attempt ${try}/5): ${body:0:300}"; sleep $((try * 5));; *) return 0;; esac
+            done
+          }
+
+          # Tag: idempotent. Missing -> create. Present on this SHA (a re-run of
+          # the same commit) -> reuse. Present on another SHA -> fail loudly: the
+          # version was chosen once in the build job and is already in the task
+          # definitions, so it cannot change here. (The build job picks N past
+          # existing tags, and deliveries are serialized per repository.)
+          req GET "${api}/git/ref/tags/${VERSION}"
+          if test "$code" = "404"; then
+            req POST "${api}/git/tags" "$(jq -nc --arg tag "$VERSION" --arg sha "$SOURCE_SHA" \
+              '{tag:$tag, message:("Release " + $tag), object:$sha, type:"commit"}')"
+            tag_sha="$(jq -r '.sha // empty' <<<"$body")"
+            test -n "$tag_sha" || { echo "::error::Could not create tag object ${VERSION} (HTTP ${code}): ${body:0:300}"; exit 1; }
+            req POST "${api}/git/refs" "$(jq -nc --arg ref "refs/tags/${VERSION}" --arg sha "$tag_sha" '{ref:$ref, sha:$sha}')"
+            if test "$code" = "422"; then
+              echo "Tag ${VERSION} was created by a concurrent attempt."
+            elif test "$code" != "201"; then
+              echo "::error::Could not create tag ${VERSION} (HTTP ${code}): ${body:0:300}"; exit 1
+            else
+              echo "Created tag ${VERSION}"
+            fi
+          elif test "$code" != "200"; then
+            echo "::error::Unexpected HTTP ${code} reading tag ${VERSION}: ${body:0:300}"; exit 1
+          fi
+          req GET "${api}/commits/${VERSION}"
+          tagged_sha="$(jq -r '.sha // empty' <<<"$body")"
+          if test "$tagged_sha" = "$SOURCE_SHA"; then
+            echo "Tag ${VERSION} points at ${SOURCE_SHA}."
           else
-            echo "::error::Unexpected HTTP ${status} reading tag ${VERSION}."; exit 1
+            echo "::error::Tag ${VERSION} points at '${tagged_sha}', not ${SOURCE_SHA}."; exit 1
           fi
 
-          status="$(call -o /dev/null -w '%{http_code}' "${api}/releases/tags/${VERSION}")"
-          if test "$status" = "404"; then
-            body="$(jq -r '"Images (linux/arm64), deployed by digest:\n" + ([.[] | "- `\(.repo)@\(.digest)`"] | join("\n"))' <<<"$IMAGES")"
-            body="${body}"$'\n\n'"Commit: ${SOURCE_SHA}"$'\n'"Workflow run: ${RUN_URL}"
-            call -f -o /dev/null -X POST "${api}/releases" -d "$(jq -nc --arg tag "$VERSION" --arg body "$body" \
+          req GET "${api}/releases/tags/${VERSION}"
+          if test "$code" = "404"; then
+            rel_body="$(jq -r '"Images (linux/arm64), deployed by digest:\n" + ([.[] | "- `\(.repo)@\(.digest)`"] | join("\n"))' <<<"$IMAGES")"
+            rel_body="${rel_body}"$'\n\n'"Commit: ${SOURCE_SHA}"$'\n'"Workflow run: ${RUN_URL}"
+            req POST "${api}/releases" "$(jq -nc --arg tag "$VERSION" --arg body "$rel_body" \
               '{tag_name:$tag, name:$tag, body:$body, generate_release_notes:true, make_latest:"true"}')"
-            echo "Created GitHub Release ${VERSION}"
-          elif test "$status" = "200"; then
+            case "$code" in
+              201) echo "Created GitHub Release ${VERSION}";;
+              422) echo "Release ${VERSION} was created by a concurrent attempt.";;
+              *) echo "::error::Could not create release ${VERSION} (HTTP ${code}): ${body:0:300}"; exit 1;;
+            esac
+          elif test "$code" = "200"; then
             echo "Release ${VERSION} already exists."
           else
-            echo "::error::Unexpected HTTP ${status} reading release ${VERSION}."; exit 1
+            echo "::error::Unexpected HTTP ${code} reading release ${VERSION}: ${body:0:300}"; exit 1
           fi
 
       - name: Job summary

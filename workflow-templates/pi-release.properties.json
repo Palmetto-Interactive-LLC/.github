@@ -1,0 +1,7 @@
+{
+  "name": "Create Release",
+  "description": "Palmetto production release: heavy gates, release tag, then the staging image to prod. Manual only.",
+  "iconName": "octicon tag",
+  "categories": ["Deployment"],
+  "filePatterns": ["Dockerfile$"]
+}

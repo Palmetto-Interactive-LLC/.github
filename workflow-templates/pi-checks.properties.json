@@ -1,7 +1,16 @@
 {
   "name": "PI Checks",
-  "description": "Palmetto standard pull-request checks on the GitHub-hosted ARM runner: quick (lint, typecheck, test, build), secrets, dependencies, workflow lint, and the aggregate pi-checks gate.",
+  "description": "Palmetto standard LIGHT pull-request checks on the GitHub-hosted ARM runner: install, lint, typecheck, quick tests, a secret scan of the PR's commits, and the aggregate pi-checks gate. Heavy gates run in Create Release.",
   "iconName": "octicon checklist",
-  "categories": ["Continuous integration"],
-  "filePatterns": ["package.json$", "go.mod$", "Cargo.toml$", "pyproject.toml$", "requirements.txt$", "main.tf$"]
+  "categories": [
+    "Continuous integration"
+  ],
+  "filePatterns": [
+    "package.json$",
+    "go.mod$",
+    "Cargo.toml$",
+    "pyproject.toml$",
+    "requirements.txt$",
+    "main.tf$"
+  ]
 }

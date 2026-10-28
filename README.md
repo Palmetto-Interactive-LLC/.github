@@ -9,7 +9,7 @@ Organization defaults, plus the CI/CD standard every active repo follows (Linear
 3. `main` takes changes only through pull requests: 0 required approvals, no bypass actors, squash-only, auto-merge on, branch deleted on merge.
 4. One set of workflows, defined here:
    - Pull requests and `main`: `pi-checks` (quick checks, secrets, dependencies, workflow lint).
-   - Deployable repos, on merge to `main`: build the arm64 image, push to ECR by full git SHA, deploy staging, wait for it to be stable, cut the release `vYYYY.MM.DD.N`, deploy the same digest to prod. No manual step.
+   - Deployable repos, on merge to `main`: build the arm64 image, push to ECR by full git SHA, fail on CRITICAL image scan findings the repo has not allowlisted, deploy staging, wait for it to be stable, cut the release `vYYYY.MM.DD.N`, deploy the same digest to prod. No manual step.
 
 The fast path is: push a branch, open a PR, let `pi-checks` pass, auto-merge.
 
@@ -87,6 +87,8 @@ Inputs: `app`, `cluster` (both required), `runner-build`, `runner-small`, plus:
 | `migrate-command` | none | Pre-deploy migration (below). |
 | `migrate-secrets` | none | `{"<env>": {"ENV_VAR": "<secret name or ARN>"}}` for the migration task only. |
 | `stable-timeout-minutes` | `15` | Per environment. |
+| `scan-allowlist` | `.github/ecr-scan-allowlist.json` | Caller-repo file of accepted CRITICAL findings (below). A missing file is an empty allowlist. |
+| `scan-timeout-minutes` | `10` | How long to wait for ECR's scan of each image. |
 
 The calling job needs `permissions: { contents: write, id-token: write }` and must not use a GitHub `environment:` (it changes the OIDC subject the deploy role trusts).
 
@@ -95,12 +97,41 @@ Repository variables, set by pi-platform: `ECS_DEPLOY_ENABLED` (`true` turns del
 Flow:
 
 1. Build. For each image: skip if `<app>/<name>:<full sha>` already exists in ECR, otherwise `docker buildx build --platform linux/arm64 --provenance=false --sbom=false` natively on the arm64 runner and push. The job fails if the image in ECR is not arm64. The digest is read back from ECR and promoted to every environment.
-2. Per environment, in order: register a new task-definition revision per service with the image digest and `SENTRY_RELEASE=<release tag>`, run the migration if set, `update-service`, then wait. A container gets the new image if its name matches the image's container or its current image is that ECR repository.
-3. The wait is a poll, not `aws ecs wait services-stable`: it requires the PRIMARY deployment of the revision just registered to reach `COMPLETED` with running equal to desired, and fails on `FAILED` (circuit-breaker rollback). ALB health is part of that. Default 15 minutes.
-4. After the first environment is stable: compute `vYYYY.MM.DD.N` (UTC day, `N` continues from existing tags; a re-run of the same commit reuses its tag), create the annotated tag and the GitHub Release (notes plus image digests).
-5. Prod gets the same digest. A failed or unstable staging stops the run before prod.
+2. Scan gate, still in the build job: for each image, wait for ECR's scan of the digest (the registry runs BASIC scanning on push) and fail on any CRITICAL finding that the allowlist doesn't accept. Nothing is deployed when it fails. Details below.
+3. Per environment, in order: register a new task-definition revision per service with the image digest and `SENTRY_RELEASE=<release tag>`, run the migration if set, `update-service`, then wait. A container gets the new image if its name matches the image's container or its current image is that ECR repository.
+4. The wait is a poll, not `aws ecs wait services-stable`: it requires the PRIMARY deployment of the revision just registered to reach `COMPLETED` with running equal to desired, and fails on `FAILED` (circuit-breaker rollback). ALB health is part of that. Default 15 minutes.
+5. After the first environment is stable: compute `vYYYY.MM.DD.N` (UTC day, `N` continues from existing tags; a re-run of the same commit reuses its tag), create the annotated tag and the GitHub Release (notes plus image digests).
+6. Prod gets the same digest. A failed or unstable staging stops the run before prod.
 
 Concurrency is one delivery per repository (`pi-deliver-<repo>`), never cancelled while running. A newer pending run replaces an older pending one.
+
+### Image scan gate
+
+The build job reads `describe-image-scan-findings` for each pushed (or reused) digest. It polls every 10 seconds until the scan is `COMPLETE` (or `ACTIVE` under enhanced scanning), up to `scan-timeout-minutes`. Then:
+
+- Every CRITICAL finding is printed as id, package and version, and the severity counts go in the job summary.
+- A CRITICAL finding fails the job unless its id is in the allowlist and the entry hasn't expired.
+- `FAILED`, an unknown status, or a scan still pending at the timeout fails the job.
+- `UNSUPPORTED_IMAGE` (scratch or distroless images with no OS package database) is a warning, not a failure, because there is nothing to gate on.
+- A reused image keeps the scan from its first push. Basic scanning doesn't rescan, so findings published since then show up on the next build of a new commit.
+
+The allowlist is a JSON file in the caller repository:
+
+```json
+{
+  "allow": [
+    {
+      "id": "CVE-2026-12345",
+      "reason": "Not reachable: the image never runs the affected binary. Tracked in PAL-1234.",
+      "expires": "2026-12-31"
+    }
+  ]
+}
+```
+
+`id` is the finding name ECR reports (the CVE id). `reason` is required. `expires` (UTC date, inclusive) is optional but expected: once it passes, the entry stops counting and the job warns about it. Keep entries few and dated, and fix the base image when a patched one exists.
+
+Bumping a caller to the gated `v1` fails its next delivery if its current image has an unaccepted CRITICAL finding. Check first with `aws ecr describe-image-scan-findings --repository-name <app>/<name> --image-id imageTag=<sha>`.
 
 ### Migrations hook
 

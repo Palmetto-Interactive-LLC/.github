@@ -14,6 +14,16 @@ name: PI Checks
 on:
   workflow_call:
     inputs:
+      mode:
+        description: >-
+          pr (default): LIGHT checks for a pull request. Install, lint,
+          typecheck, quick-test-command, a secret scan of the PR's commits, and
+          actionlint when workflows changed. Docs-only changes exit fast.
+          release: the HEAVY gates for a production release (full test suite,
+          build, dependency audit, full-history secret scan, actionlint and
+          zizmor, release-gate-command). Called by pi-release.yml.
+        type: string
+        default: pr
       runner-small:
         description: >-
           runs-on for every job, as a JSON array of labels. Defaults to the
@@ -57,11 +67,27 @@ on:
         type: string
         default: ""
       test-command:
-        description: Overrides the stack default. "-" skips the phase.
+        description: >-
+          The FULL test suite. Release mode only. Overrides the stack default.
+          "-" skips the phase.
+        type: string
+        default: ""
+      quick-test-command:
+        description: >-
+          Fast unit tests for pull requests (target: seconds). Empty means the
+          node scripts test:quick or test:unit when one exists, and nothing for
+          other stacks. "-" skips the phase.
         type: string
         default: ""
       build-command:
-        description: Overrides the stack default. "-" skips the phase.
+        description: Release mode only. Overrides the stack default. "-" skips the phase.
+        type: string
+        default: ""
+      release-gate-command:
+        description: >-
+          Extra heavy gate for a release (IaC and policy checks, cost gates,
+          integration suites). Runs after the standard release phases, in the
+          working directory. Empty or "-" skips it.
         type: string
         default: ""
 
@@ -83,13 +109,62 @@ env:
   ZIZMOR_VERSION: 1.26.1
 
 jobs:
+  # Decides what a pull request needs. Docs-only changes (Markdown, docs/,
+  # licenses, images) skip every other job. Release mode never skips.
+  changes:
+    name: changes
+    runs-on: ${{ fromJSON(inputs.runner-small) }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      docs_only: ${{ steps.diff.outputs.docs_only }}
+      workflows: ${{ steps.diff.outputs.workflows }}
+    steps:
+      # Two shallow trees are enough: the PR's merge commit and its base.
+      - name: Checkout
+        if: inputs.mode == 'pr' && github.event.pull_request.number
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Classify the changed files
+        id: diff
+        shell: bash
+        env:
+          MODE: ${{ inputs.mode }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if test "$MODE" != "pr" || test -z "$PR_NUMBER"; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"; echo "workflows=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          files="$(git diff --name-only "$BASE_SHA" HEAD)"
+          if test -z "$files"; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"; echo "workflows=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if grep -qvE '(^docs/|^LICENSE|^CODEOWNERS$|^[^/]*[.](md|mdx|txt|rst|png|jpe?g|gif|svg|webp)$|[.](md|mdx|txt|rst)$)' <<<"$files"; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+            echo "Docs-only change: nothing to run."
+          fi
+          if grep -qE '^[.]github/(workflows|actions)/' <<<"$files"; then echo "workflows=true" >> "$GITHUB_OUTPUT"; else echo "workflows=false" >> "$GITHUB_OUTPUT"; fi
+
   quick:
     name: quick
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ${{ fromJSON(inputs.runner-small) }}
     timeout-minutes: 30
     permissions:
       contents: read
     env:
+      MODE: ${{ inputs.mode }}
+      IN_QUICK_TEST: ${{ inputs.quick-test-command }}
+      IN_RELEASE_GATE: ${{ inputs.release-gate-command }}
       STACK: ${{ inputs.stack }}
       IN_INSTALL: ${{ inputs.install-command }}
       IN_LINT: ${{ inputs.lint-command }}
@@ -183,7 +258,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          install=""; lint=""; typecheck=""; test_cmd=""; build=""
+          install=""; lint=""; typecheck=""; test_cmd=""; build=""; quick_test=""
           case "$STACK" in
             node)
               cd "$WORKDIR"
@@ -209,6 +284,8 @@ jobs:
               }
               lint="$(phase lint)"; typecheck="$(phase typecheck)"
               test_cmd="$(phase test)"; build="$(phase build)"
+              has() { echo "node -e 'process.exit(require(\"./package.json\").scripts?.[\"$1\"] ? 0 : 1)'"; }
+              quick_test="if $(has test:quick); then $pm run test:quick; elif $(has test:unit); then $pm run test:unit; else echo \"No test:quick or test:unit script; skipping.\"; fi"
               ;;
             python)
               install='if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; elif [ -f pyproject.toml ]; then python -m pip install -e ".[dev]" || python -m pip install -e .; fi'
@@ -239,12 +316,20 @@ jobs:
           esac
           # A caller override wins; "-" turns the phase off.
           pick() { if [ -n "$1" ]; then echo "$1"; else echo "$2"; fi; }
+          # Pull requests run the light phases only. The full suite, the build
+          # and the release gate belong to a production release.
+          if [ "$MODE" = "release" ]; then
+            cmd_test="$(pick "$IN_TEST" "$test_cmd")"; cmd_build="$(pick "$IN_BUILD" "$build")"; cmd_gate="$IN_RELEASE_GATE"
+          else
+            cmd_test="$(pick "$IN_QUICK_TEST" "$quick_test")"; cmd_build="-"; cmd_gate="-"
+          fi
           {
             echo "CMD_INSTALL=$(pick "$IN_INSTALL" "$install")"
             echo "CMD_LINT=$(pick "$IN_LINT" "$lint")"
             echo "CMD_TYPECHECK=$(pick "$IN_TYPECHECK" "$typecheck")"
-            echo "CMD_TEST=$(pick "$IN_TEST" "$test_cmd")"
-            echo "CMD_BUILD=$(pick "$IN_BUILD" "$build")"
+            echo "CMD_TEST=${cmd_test}"
+            echo "CMD_BUILD=${cmd_build}"
+            echo "CMD_GATE=${cmd_gate}"
           } >> "$GITHUB_ENV"
 
       - name: Install
@@ -272,17 +357,26 @@ jobs:
         working-directory: ${{ inputs.working-directory }}
         run: bash -euo pipefail -c "$CMD_BUILD"
 
+      - name: Release gate
+        if: env.CMD_GATE != '' && env.CMD_GATE != '-'
+        working-directory: ${{ inputs.working-directory }}
+        run: bash -euo pipefail -c "$CMD_GATE"
+
   secrets:
     name: secrets
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ${{ fromJSON(inputs.runner-small) }}
     timeout-minutes: 10
     permissions:
       contents: read
     steps:
+      # A pull request scans only its own commits (the merge commit plus the
+      # PR's commits), so the checkout stays shallow (100 commits). A release scans history.
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          fetch-depth: 0
+          fetch-depth: ${{ inputs.mode == 'release' && 0 || 100 }}
           persist-credentials: false
 
       - name: Install gitleaks
@@ -304,12 +398,23 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$artifact" -C "$dest" gitleaks
           echo "$dest" >> "$GITHUB_PATH"
 
-      - name: Scan history for secrets
+      - name: Scan for secrets
         shell: bash
-        run: gitleaks detect --source . --redact --no-banner
+        env:
+          MODE: ${{ inputs.mode }}
+          PR_COMMITS: ${{ github.event.pull_request.commits }}
+        run: |
+          set -euo pipefail
+          if test "$MODE" = "pr" && test -n "$PR_COMMITS"; then
+            if test "$PR_COMMITS" -gt 99; then git fetch --unshallow --quiet || true; fi
+            gitleaks detect --source . --redact --no-banner --log-opts="-n $((PR_COMMITS + 1))"
+          else
+            gitleaks detect --source . --redact --no-banner
+          fi
 
   deps:
     name: deps
+    if: inputs.mode == 'release'
     runs-on: ${{ fromJSON(inputs.runner-small) }}
     timeout-minutes: 10
     permissions:
@@ -378,6 +483,8 @@ jobs:
 
   actions:
     name: actions
+    needs: changes
+    if: inputs.mode == 'release' || needs.changes.outputs.workflows == 'true'
     runs-on: ${{ fromJSON(inputs.runner-small) }}
     timeout-minutes: 10
     permissions:
@@ -389,12 +496,15 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python
+        if: inputs.mode == 'release'
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
 
       - name: Install actionlint and zizmor
         shell: bash
+        env:
+          MODE: ${{ inputs.mode }}
         run: |
           set -euo pipefail
           case "$(uname -m)" in
@@ -411,12 +521,13 @@ jobs:
           grep "  $artifact$" "$RUNNER_TEMP/actionlint_checksums.txt" | (cd "$RUNNER_TEMP" && sha256sum -c -)
           tar -xzf "$RUNNER_TEMP/$artifact" -C "$dest" actionlint
           echo "$dest" >> "$GITHUB_PATH"
-          python -m pip install --quiet "zizmor==${ZIZMOR_VERSION}"
+          if test "$MODE" = "release"; then python -m pip install --quiet "zizmor==${ZIZMOR_VERSION}"; fi
 
-      - name: Lint workflows (actionlint, zizmor high)
+      - name: Lint workflows (actionlint; zizmor on a release)
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          MODE: ${{ inputs.mode }}
         run: |
           set -euo pipefail
           if ! compgen -G ".github/workflows/*.y*ml" >/dev/null; then
@@ -424,13 +535,13 @@ jobs:
             exit 0
           fi
           actionlint -color=false
-          zizmor --min-severity high --no-progress .github/workflows
+          if test "$MODE" = "release"; then zizmor --min-severity high --no-progress .github/workflows; fi
 
   # The single required status check. Fails unless every job above succeeded.
   pi-checks:
     name: pi-checks
     if: always()
-    needs: [quick, secrets, deps, actions]
+    needs: [changes, quick, secrets, deps, actions]
     runs-on: ${{ fromJSON(inputs.runner-small) }}
     timeout-minutes: 5
     permissions: {}
@@ -442,9 +553,11 @@ jobs:
         run: |
           set -euo pipefail
           echo "Job results: $RESULTS"
-          if jq -e 'all(. == "success")' <<<"$RESULTS" >/dev/null; then
+          # skipped is a pass: docs-only changes and the release-only jobs skip.
+          # A failure upstream still shows as failure in the list.
+          if jq -e 'all(. == "success" or . == "skipped")' <<<"$RESULTS" >/dev/null; then
             echo "All checks passed."
           else
-            echo "::error::One or more checks failed, were cancelled, or were skipped."
+            echo "::error::One or more checks failed or were cancelled."
             exit 1
           fi

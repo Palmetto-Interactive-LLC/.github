@@ -1,0 +1,41 @@
+# Palmetto production release. The ONLY way prod changes: run this workflow by
+# hand (Actions, Create Release, Run workflow, branch main). It runs the heavy
+# gates (full tests, dependency audit, secret history scan, workflow lint,
+# release-gate-command), checks the ECR scan of the image staging is running,
+# cuts the tag vYYYY.MM.DD.N and the GitHub Release, and deploys that same
+# digest to prod with the migration. To roll back instead, fill rollback_to
+# and rollback_env.
+# Keep the workflow name exactly "Create Release" and the trigger workflow_dispatch only.
+# Replace __APP__, __CLUSTER__ and the stack. Mirror the `with:` of pi-deliver.yml.
+name: Create Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      rollback_to:
+        description: "Leave empty to release the head of main. To roll back instead: a release tag (vYYYY.MM.DD.N) or full commit SHA on main."
+        required: false
+        default: ""
+      rollback_env:
+        description: "Environment to roll back (used only with rollback_to)."
+        type: choice
+        options: [staging, prod]
+        default: prod
+
+permissions: {}
+
+jobs:
+  release:
+    permissions:
+      contents: write
+      id-token: write
+    uses: Palmetto-Interactive-LLC/.github/.github/workflows/pi-release.yml@__PIN__ # v1
+    with:
+      app: __APP__
+      cluster: __CLUSTER__
+      stack: node # node | python | go | rust | tofu | docs
+      # images: '[{"name":"web","dockerfile":"Dockerfile","context":"."}]'
+      # services: '["__APP__"]'
+      # migrate-command: npm run migrate
+      # test-command: npm test            # the FULL suite; pull requests run quick-test-command only
+      # release-gate-command: bash scripts/release-gates.sh

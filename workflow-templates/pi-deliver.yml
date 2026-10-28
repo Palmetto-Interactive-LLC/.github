@@ -1,6 +1,7 @@
 # Palmetto standard delivery for apps on ECS. On merge to main: build the arm64
-# image, push it to ECR by full git SHA, deploy staging, wait for it to be stable,
-# cut the release tag vYYYY.MM.DD.N, then deploy the same digest to prod.
+# image, push it to ECR by full git SHA, deploy STAGING and wait for it to be
+# stable. Production is never deployed from here; it goes out only through the
+# manual "Create Release" workflow (create-release.yml).
 # Runs on the GitHub-hosted ARM runner (ubuntu-24.04-arm); arm64 images build natively
 # with buildx. Do not override the runner inputs: the label lives in the central workflow.
 # Replace __APP__ (ECR <app>/web, services <app>-staging and <app>-prod) and
@@ -12,25 +13,15 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      rollback_to:
-        description: "Roll back to this release tag (vYYYY.MM.DD.N) or full commit SHA. Leave empty for a normal delivery of main."
-        required: false
-        default: ""
-      rollback_env:
-        description: "Environment to roll back (needed with rollback_to)."
-        type: choice
-        options: [staging, prod]
-        default: staging
 
 permissions: {}
 
 jobs:
   deliver:
     permissions:
-      contents: write
+      contents: write # the shared workflow's release job asks for it; staging never uses it
       id-token: write
-    uses: Palmetto-Interactive-LLC/.github/.github/workflows/pi-deliver.yml@77fe07781ae29fb4439ae26ac00130f6669240ec # v1
+    uses: Palmetto-Interactive-LLC/.github/.github/workflows/pi-deliver.yml@__PIN__ # v1
     with:
       app: __APP__
       cluster: __CLUSTER__

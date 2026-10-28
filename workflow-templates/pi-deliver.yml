@@ -12,6 +12,16 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      rollback_to:
+        description: "Roll back to this release tag (vYYYY.MM.DD.N) or full commit SHA. Leave empty for a normal delivery of main."
+        required: false
+        default: ""
+      rollback_env:
+        description: "Environment to roll back (needed with rollback_to)."
+        type: choice
+        options: [staging, prod]
+        default: staging
 
 permissions: {}
 
@@ -20,7 +30,7 @@ jobs:
     permissions:
       contents: write
       id-token: write
-    uses: Palmetto-Interactive-LLC/.github/.github/workflows/pi-deliver.yml@2c398a29a0853301b60f368e042715e7a84b6a9f # v1
+    uses: Palmetto-Interactive-LLC/.github/.github/workflows/pi-deliver.yml@77fe07781ae29fb4439ae26ac00130f6669240ec # v1
     with:
       app: __APP__
       cluster: __CLUSTER__

@@ -19,6 +19,6 @@ jobs:
   pi-checks:
     permissions:
       contents: read
-    uses: Palmetto-Interactive-LLC/.github/.github/workflows/pi-checks.yml@2c398a29a0853301b60f368e042715e7a84b6a9f # v1
+    uses: Palmetto-Interactive-LLC/.github/.github/workflows/pi-checks.yml@77fe07781ae29fb4439ae26ac00130f6669240ec # v1
     with:
       stack: node # node | python | go | rust | tofu | docs

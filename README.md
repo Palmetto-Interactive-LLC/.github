@@ -92,7 +92,27 @@ Inputs: `app`, `cluster` (both required), `runner-build`, `runner-small`, plus:
 
 The calling job needs `permissions: { contents: write, id-token: write }` and must not use a GitHub `environment:` (it changes the OIDC subject the deploy role trusts).
 
-**Stale runs never deploy.** Each deploy job first compares the run's commit with the current head of its branch (GitHub API). If they differ (a re-run of an old run, or an older run that was queued behind a newer one), every later step is skipped, with a notice, and the job succeeds. The only override is a `workflow_dispatch` whose caller declares a boolean input `rollback` and sets it true. A rollback to an older image also needs a caller that dispatches it; the build job still requires the `main` ref.
+**Stale runs never deploy.** Each deploy job first compares the run's commit with the current head of its branch (GitHub API). If they differ (a re-run of an old run, or an older run that was queued behind a newer one), every later step is skipped, with a notice, and the job succeeds. The only way to deploy an older commit is a rollback (next section).
+
+**Rollback.** A rollback redeploys an image that is already in ECR to one environment. Nothing is built, scanned, migrated or released, and it still runs from the `main` ref. The caller's `workflow_dispatch` must declare two inputs (the template has them):
+
+```yaml
+  workflow_dispatch:
+    inputs:
+      rollback_to:
+        description: "Roll back to this release tag (vYYYY.MM.DD.N) or full commit SHA. Leave empty for a normal delivery of main."
+        required: false
+        default: ""
+      rollback_env:
+        description: "Environment to roll back (needed with rollback_to)."
+        type: choice
+        options: [staging, prod]
+        default: staging
+```
+
+Run it from Actions, "PI Deliver", Run workflow on `main`, or `gh workflow run "PI Deliver" -R <org>/<repo> --ref main -f rollback_to=v2026.10.28.2 -f rollback_env=staging`. The target must be a release tag or commit on `main`, and its image `<app>/<name>:<sha>` must still exist in ECR (the lifecycle policy may have expired old ones). The service rolls to that image's digest, the head check is skipped, and `SENTRY_RELEASE` is the target's tag (`sha-<12 chars>` if it has none). Database migrations are not reversed, and a rollback skips the migration step, so only roll back to a build whose schema the current database still satisfies.
+
+**Rolling forward** is a normal run: `gh workflow run "PI Deliver" -R <org>/<repo> --ref main` (no inputs) delivers the head of `main` again, reusing its existing image. A rollback leaves the environment on the old commit until then, or until the next merge to `main`.
 
 Repository variables, set by pi-platform: `ECS_DEPLOY_ENABLED` (`true` turns delivery on; otherwise the workflow does nothing), `PI_PLATFORM_IMAGE_PUSH_ROLE_ARN` (ECR push, build job), `ECS_DEPLOY_ROLE_ARN` (deploy jobs).
 

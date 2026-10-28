@@ -151,8 +151,9 @@ jobs:
           case "$MODE" in
             staging) ;;
             release|rollback)
-              test "$EVENT_NAME" = "workflow_dispatch" && test "$GITHUB_REF" = "refs/heads/main" \
-                || { echo "::error::mode=${MODE} deploys prod and runs only on a workflow_dispatch from refs/heads/main (this is ${EVENT_NAME} on ${GITHUB_REF})."; exit 1; }
+              if test "$EVENT_NAME" != "workflow_dispatch" || test "$GITHUB_REF" != "refs/heads/main"; then
+                echo "::error::mode=${MODE} deploys prod and runs only on a workflow_dispatch from refs/heads/main (this is ${EVENT_NAME} on ${GITHUB_REF})."; exit 1
+              fi
               if test "$MODE" = "rollback"; then
                 test -n "$ROLLBACK_TO" || { echo "::error::mode=rollback needs the rollback_to input."; exit 1; }
               else

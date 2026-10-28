@@ -1,0 +1,7 @@
+{
+  "name": "PI Deliver",
+  "description": "Palmetto standard ECS delivery: arm64 image to ECR by SHA, staging, release tag vYYYY.MM.DD.N, then the same digest to prod.",
+  "iconName": "octicon rocket",
+  "categories": ["Deployment"],
+  "filePatterns": ["Dockerfile$"]
+}

@@ -4,7 +4,7 @@ Organization defaults, plus the CI/CD standard every active repo follows (Linear
 
 ## CI/CD standard
 
-1. Every GitHub Actions job runs on GitHub-hosted ARM runners: `runs-on: ubuntu-24.04-arm`. Not Marsh/Daytona, not CodeBuild, not x86_64 `ubuntu-latest`. This is interim until Daytona v2 arm64 access; only the runner label changes then, and it lives in one place (see "Reusable workflows").
+1. Every GitHub Actions job runs on GitHub-hosted ARM runners: `runs-on: ubuntu-24.04-arm`. Not Marsh/Daytona, not CodeBuild, not x86_64 `ubuntu-latest`. The two exceptions below are the only ones. This is interim until Daytona v2 arm64 access; only the runner label changes then, and it lives in one place (see "Reusable workflows").
 2. ECS hosts are Graviton, so images are `linux/arm64`. They build natively on the ARM runner with `docker buildx build --platform linux/arm64`. No QEMU.
 3. `main` takes changes only through pull requests: 0 required approvals, no bypass actors, squash-only, auto-merge on, branch deleted on merge.
 4. One set of workflows, defined here:
@@ -12,6 +12,17 @@ Organization defaults, plus the CI/CD standard every active repo follows (Linear
    - Deployable repos, on merge to `main`: build the arm64 image, push to ECR by full git SHA, deploy staging, wait for it to be stable, cut the release `vYYYY.MM.DD.N`, deploy the same digest to prod. No manual step.
 
 The fast path is: push a branch, open a PR, let `pi-checks` pass, auto-merge.
+
+### Exceptions
+
+Two exceptions to the runner and architecture rules. Each repo listed here keeps the exception to the jobs named, and everything else follows the standard.
+
+| Exception | Repos | Scope |
+|---|---|---|
+| GitHub-hosted macOS and Windows runners (`macos-15`, `windows-latest`) | `boardwalk`, `Sweetgrass` | Only the platform-specific build and release jobs. `boardwalk` builds `Boardwalk.app` in `build.yml` on `macos-15`. `Sweetgrass` builds its npm release binaries in the `build` matrix of `release.yml`: `macos-15` (darwin-arm64, darwin-x64), `ubuntu-24.04` (linux-x64), `windows-latest` (win32-x64). Their `pi-checks`, release publishing and npm publish jobs stay on `ubuntu-24.04-arm`. |
+| `linux/amd64` image on `ubuntu-24.04` | `Mastra` | The image runs on the Meleys k3s node in the homelab, which is x86. It is pushed to ECR (`mastra/agent-hub`) over OIDC, since the homelab registry is not reachable from GitHub-hosted runners. |
+
+A new exception needs a reason that a Linux ARM runner cannot satisfy (an Apple or Windows toolchain, or a non-ARM deploy target). Add the repo to this table in the same pull request that introduces it.
 
 ## Reusable workflows
 

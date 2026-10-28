@@ -121,11 +121,13 @@ jobs:
       docs_only: ${{ steps.diff.outputs.docs_only }}
       workflows: ${{ steps.diff.outputs.workflows }}
     steps:
-      # Two shallow trees are enough: the PR's merge commit and its base.
+      # Depth 2 holds the PR's merge commit and both its parents, so the base
+      # branch tip (HEAD^1) is there without a second, credentialed fetch.
       - name: Checkout
         if: inputs.mode == 'pr' && github.event.pull_request.number
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          fetch-depth: 2
           persist-credentials: false
 
       - name: Classify the changed files
@@ -134,14 +136,12 @@ jobs:
         env:
           MODE: ${{ inputs.mode }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           if test "$MODE" != "pr" || test -z "$PR_NUMBER"; then
             echo "docs_only=false" >> "$GITHUB_OUTPUT"; echo "workflows=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          git fetch --no-tags --depth=1 origin "$BASE_SHA"
-          files="$(git diff --name-only "$BASE_SHA" HEAD)"
+          files="$(git diff --name-only HEAD^1 HEAD)"
           if test -z "$files"; then
             echo "docs_only=false" >> "$GITHUB_OUTPUT"; echo "workflows=true" >> "$GITHUB_OUTPUT"; exit 0
           fi

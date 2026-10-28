@@ -1,0 +1,26 @@
+# Dogfoods the central pi-checks workflow on this repository.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pi-checks:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/pi-checks.yml
+    with:
+      stack: docs
+      # TODO(PAL-1022): this repository has no CodeBuild runner project yet
+      # (pi-platform local.codebuild_runners). Run on GitHub-hosted ubuntu-latest
+      # until one exists, then switch to
+      # codebuild-pi-platform-runner-<project>-${{ github.run_id }}-${{ github.run_attempt }}-arm-3.0-small
+      runner-small: ubuntu-latest

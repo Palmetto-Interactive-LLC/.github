@@ -1,0 +1,453 @@
+# Palmetto standard delivery (reusable): on merge to main, build the arm64 image
+# once, push it to ECR by full git SHA, deploy staging on ECS, wait for it to be
+# stable, cut the release (vYYYY.MM.DD.N), then deploy the SAME image digest to
+# prod. See README.md ("CI/CD standard").
+#
+# Reusable workflows run on the CALLER's runners, so every job takes its
+# runs-on from an input. The caller must grant:
+#   permissions: { contents: write, id-token: write }
+# on the job that calls this workflow. The deploy role trust policy only accepts
+# the repository's main branch, so do not use GitHub "environment:" on the job
+# that calls this workflow (it changes the OIDC subject).
+#
+# Inert unless the caller repository variable ECS_DEPLOY_ENABLED is 'true'.
+# Caller repository variables (set by pi-platform):
+#   ECS_DEPLOY_ENABLED              "true" turns delivery on
+#   PI_PLATFORM_IMAGE_PUSH_ROLE_ARN OIDC role that pushes this app's ECR repos
+#   ECS_DEPLOY_ROLE_ARN             OIDC role that registers task definitions and
+#                                   updates this app's services
+name: PI Deliver
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: App name. ECR repositories are <app>/<image name>; services are <service>-<env>.
+        type: string
+        required: true
+      cluster:
+        description: ECS cluster name.
+        type: string
+        required: true
+      runner-build:
+        description: >-
+          runs-on for the image build. A plain label, or a JSON array of labels
+          when starting with "[". Use a medium or large CodeBuild ARM size.
+        type: string
+        required: true
+      runner-small:
+        description: runs-on for the deploy jobs (same format as runner-build).
+        type: string
+        required: true
+      images:
+        description: >-
+          JSON list of {name, dockerfile, context[, container]}. name is the ECR
+          repository suffix (<app>/<name>). container defaults to the main
+          container for name "web" and to name otherwise.
+        type: string
+        default: '[{"name":"web","dockerfile":"Dockerfile","context":"."}]'
+      services:
+        description: JSON list of service app names. Defaults to [app]. Each runs as <service>-<env>.
+        type: string
+        default: ""
+      container-name:
+        description: Main container name (receives the "web" image).
+        type: string
+        default: web
+      environments:
+        description: JSON list of environments, deployed in order. The release is cut after the first.
+        type: string
+        default: '["staging","prod"]'
+      migrate-command:
+        description: >-
+          Optional pre-deploy migration, run once per environment as a one-off
+          ECS task from the new task definition. A plain string runs under
+          "sh -c". A JSON array is used as the exact command (distroless images).
+        type: string
+        default: ""
+      migrate-secrets:
+        description: >-
+          Optional JSON of extra Secrets Manager references for the migration task
+          only: {"<env>": {"ENV_VAR": "<secret name or ARN>"}}.
+        type: string
+        default: ""
+      stable-timeout-minutes:
+        type: number
+        default: 15
+
+permissions: {}
+
+# One delivery per repository at a time. Queued runs wait; a running deploy is
+# never cancelled (a newer pending run replaces an older pending one).
+concurrency:
+  group: pi-deliver-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  build:
+    name: Build image
+    if: vars.ECS_DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/main'
+    runs-on: ${{ startsWith(inputs.runner-build, '[') && fromJSON(inputs.runner-build) || inputs.runner-build }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      images: ${{ steps.build.outputs.images }}
+      version: ${{ steps.version.outputs.version }}
+    env:
+      APP: ${{ inputs.app }}
+      IMAGES_INPUT: ${{ inputs.images }}
+      SOURCE_SHA: ${{ github.sha }}
+      SOURCE_REPOSITORY: ${{ github.repository }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Validate release identity
+        shell: bash
+        env:
+          AWS_ROLE_ARN: ${{ vars.PI_PLATFORM_IMAGE_PUSH_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::The image tag must be the full 40-character commit SHA."; exit 1; }
+          test -n "$AWS_ROLE_ARN" || { echo "::error::Set the PI_PLATFORM_IMAGE_PUSH_ROLE_ARN repository variable."; exit 1; }
+          case "$(uname -m)" in
+            aarch64|arm64) ;;
+            *) echo "::error::Images build natively for arm64. runner-build must be a CodeBuild ARM runner (got $(uname -m))."; exit 1 ;;
+          esac
+          jq -e 'type == "array" and length > 0 and all(.[]; has("name") and has("dockerfile") and has("context"))' <<<"$IMAGES_INPUT" >/dev/null \
+            || { echo "::error::images must be a JSON list of {name, dockerfile, context}."; exit 1; }
+
+      - name: Configure AWS credentials through GitHub OIDC (image push)
+        uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: pi-deliver-build-${{ github.run_id }}
+          role-to-assume: ${{ vars.PI_PLATFORM_IMAGE_PUSH_ROLE_ARN }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2.1.6
+        with:
+          mask-password: true
+
+      - name: Build and push arm64 images (skipped when the SHA tag exists)
+        id: build
+        shell: bash
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          MAIN_CONTAINER: ${{ inputs.container-name }}
+        run: |
+          set -euo pipefail
+          result='[]'
+          while read -r image; do
+            name="$(jq -r .name <<<"$image")"
+            dockerfile="$(jq -r .dockerfile <<<"$image")"
+            context="$(jq -r .context <<<"$image")"
+            container="$(jq -r --arg main "$MAIN_CONTAINER" '.container // (if .name == "web" then $main else .name end)' <<<"$image")"
+            repo="${APP}/${name}"
+            uri="${REGISTRY}/${repo}:${SOURCE_SHA}"
+
+            err="$(mktemp)"
+            if aws ecr describe-images --repository-name "$repo" --image-ids "imageTag=${SOURCE_SHA}" --region "$AWS_REGION" >/dev/null 2>"$err"; then
+              echo "::notice::${repo}:${SOURCE_SHA} already exists in ECR; reusing it."
+            elif grep -q ImageNotFoundException "$err"; then
+              echo "::group::Build ${repo} (linux/arm64)"
+              labels=(--label "org.opencontainers.image.revision=${SOURCE_SHA}"
+                      --label "org.opencontainers.image.source=https://github.com/${SOURCE_REPOSITORY}")
+              if docker buildx version >/dev/null 2>&1; then
+                # One plain image manifest: no attestation index, so the digest we
+                # promote to prod is the image itself.
+                docker buildx build --platform linux/arm64 --provenance=false --sbom=false \
+                  "${labels[@]}" --file "$dockerfile" --tag "$uri" --push "$context"
+              else
+                docker build --platform linux/arm64 "${labels[@]}" --file "$dockerfile" --tag "$uri" "$context"
+                docker push "$uri"
+              fi
+              echo "::endgroup::"
+            else
+              cat "$err"
+              echo "::error::Could not check ECR for ${repo}:${SOURCE_SHA}."
+              exit 1
+            fi
+            rm -f "$err"
+
+            digest="$(aws ecr describe-images --repository-name "$repo" --image-ids "imageTag=${SOURCE_SHA}" \
+              --region "$AWS_REGION" --query 'imageDetails[0].imageDigest' --output text)"
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::ECR returned no valid digest for ${repo}."; exit 1; }
+            result="$(jq -c --arg name "$name" --arg repo "$repo" --arg container "$container" \
+              --arg ref "${REGISTRY}/${repo}@${digest}" --arg digest "$digest" \
+              '. + [{name:$name, repo:$repo, container:$container, ref:$ref, digest:$digest}]' <<<"$result")"
+          done < <(jq -c '.[]' <<<"$IMAGES_INPUT")
+          echo "images=${result}" >> "$GITHUB_OUTPUT"
+
+      - name: Choose the release version (vYYYY.MM.DD.N, N counts per UTC day)
+        id: version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/${SOURCE_REPOSITORY}"
+          get() { curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "$@"; }
+          # Re-run of the same commit: keep the tag it already has.
+          existing="$(get "${api}/tags?per_page=100" | jq -r --arg sha "$SOURCE_SHA" \
+            '[.[] | select(.commit.sha == $sha and (.name | test("^v[0-9]{4}[.][0-9]{2}[.][0-9]{2}[.][0-9]+$")))][0].name // empty')"
+          if test -n "$existing"; then
+            version="$existing"
+          else
+            prefix="v$(date -u +%Y.%m.%d)."
+            last="$(get "${api}/git/matching-refs/tags/${prefix}" | jq -r --arg p "refs/tags/${prefix}" \
+              '[.[].ref | ltrimstr($p) | select(test("^[0-9]+$")) | tonumber] | max // 0')"
+            version="${prefix}$((last + 1))"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Release version: ${version}"
+
+  deploy:
+    name: Deploy ${{ matrix.env }}
+    needs: build
+    runs-on: ${{ startsWith(inputs.runner-small, '[') && fromJSON(inputs.runner-small) || inputs.runner-small }}
+    timeout-minutes: 90
+    # contents: write is used only by the release step after the first
+    # environment (annotated tag and GitHub Release through the REST API).
+    permissions:
+      contents: write
+      id-token: write
+    strategy:
+      # In order, one at a time. A failed or unstable environment stops the next.
+      max-parallel: 1
+      fail-fast: true
+      matrix:
+        env: ${{ fromJSON(inputs.environments) }}
+    env:
+      APP: ${{ inputs.app }}
+      CLUSTER: ${{ inputs.cluster }}
+      DEPLOY_ENV: ${{ matrix.env }}
+      SERVICES_INPUT: ${{ inputs.services }}
+      IMAGES: ${{ needs.build.outputs.images }}
+      VERSION: ${{ needs.build.outputs.version }}
+      MIGRATE_COMMAND: ${{ inputs.migrate-command }}
+      MIGRATE_SECRETS: ${{ inputs.migrate-secrets }}
+      MAIN_CONTAINER: ${{ inputs.container-name }}
+      STABLE_MINUTES: ${{ inputs.stable-timeout-minutes }}
+      SOURCE_SHA: ${{ github.sha }}
+    steps:
+      - name: Require a deploy role
+        shell: bash
+        env:
+          AWS_ROLE_ARN: ${{ vars.ECS_DEPLOY_ROLE_ARN }}
+        run: |
+          test -n "$AWS_ROLE_ARN" || { echo "::error::Set the ECS_DEPLOY_ROLE_ARN repository variable."; exit 1; }
+
+      - name: Configure AWS credentials through GitHub OIDC (ECS deploy)
+        uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: pi-deliver-${{ matrix.env }}-${{ github.run_id }}
+          role-to-assume: ${{ vars.ECS_DEPLOY_ROLE_ARN }}
+
+      - name: Register task definitions with the new image
+        id: register
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -n "$SERVICES_INPUT"; then services="$SERVICES_INPUT"; else services="$(jq -nc --arg a "$APP" '[$a]')"; fi
+          jq -e 'type == "array" and length > 0 and all(.[]; type == "string")' <<<"$services" >/dev/null \
+            || { echo "::error::services must be a JSON list of names."; exit 1; }
+          workdir="$RUNNER_TEMP/taskdefs"; mkdir -p "$workdir"
+          deploy='[]'
+          for svc in $(jq -r '.[]' <<<"$services"); do
+            family="${svc}-${DEPLOY_ENV}"
+            aws ecs describe-task-definition --task-definition "$family" --query taskDefinition --output json \
+              | jq --argjson imgs "$IMAGES" --arg rel "$VERSION" '
+                  del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities,
+                      .registeredAt, .registeredBy, .deregisteredAt)
+                  | .containerDefinitions |= map(
+                      . as $c
+                      | ([ $imgs[] | select(.container == $c.name
+                            or .repo == ($c.image | sub("^[^/]+/"; "") | sub("[:@].*$"; ""))) ][0]) as $m
+                      | if $m == null then .
+                        else .image = $m.ref
+                          | .environment = (((.environment // []) | map(select(.name != "SENTRY_RELEASE")))
+                                            + [{name: "SENTRY_RELEASE", value: $rel}])
+                        end)' > "$workdir/${family}.json"
+            swapped="$(jq --argjson imgs "$IMAGES" '[.containerDefinitions[] | select(.image as $i | $imgs | any(.ref == $i))] | length' "$workdir/${family}.json")"
+            test "$swapped" -gt 0 || { echo "::error::No container in ${family} matched an image in this build (containers: $(jq -r '[.containerDefinitions[].name] | join(", ")' "$workdir/${family}.json"))."; exit 1; }
+            arn="$(aws ecs register-task-definition --cli-input-json "file://$workdir/${family}.json" \
+              --query taskDefinition.taskDefinitionArn --output text)"
+            echo "Registered ${arn} (${swapped} container image(s) updated)"
+            deploy="$(jq -c --arg family "$family" --arg arn "$arn" '. + [{family:$family, arn:$arn}]' <<<"$deploy")"
+          done
+          echo "deploy=${deploy}" >> "$GITHUB_OUTPUT"
+
+      - name: Run pre-deploy migration
+        if: inputs.migrate-command != ''
+        shell: bash
+        env:
+          DEPLOY: ${{ steps.register.outputs.deploy }}
+        run: |
+          set -euo pipefail
+          workdir="$RUNNER_TEMP/taskdefs"
+          family="$(jq -r '.[0].family' <<<"$DEPLOY")"
+          arn="$(jq -r '.[0].arn' <<<"$DEPLOY")"
+
+          # Optional migration-only Secrets Manager references, as a separate
+          # revision of the same family. The services keep the first revision.
+          extra="$(jq -c --arg env "$DEPLOY_ENV" 'if . == null then {} elif all(.[]; type == "string") then . else (.[$env] // {}) end' <<<"${MIGRATE_SECRETS:-null}")"
+          if test "$extra" != "{}" && test "$extra" != "null"; then
+            jq --arg main "$MAIN_CONTAINER" --argjson extra "$extra" '
+                .containerDefinitions |= map(
+                  if .name == $main then
+                    .secrets = (((.secrets // []) | map(select(.name as $n | $extra | has($n) | not)))
+                                + ($extra | to_entries | map({name: .key, valueFrom: .value})))
+                  else . end)' "$workdir/${family}.json" > "$workdir/${family}-migrate.json"
+            arn="$(aws ecs register-task-definition --cli-input-json "file://$workdir/${family}-migrate.json" \
+              --query taskDefinition.taskDefinitionArn --output text)"
+            echo "Registered migration-only revision ${arn}"
+          fi
+
+          if jq -e 'type == "array"' <<<"$MIGRATE_COMMAND" >/dev/null 2>&1; then
+            command="$MIGRATE_COMMAND"
+          else
+            command="$(jq -nc --arg c "$MIGRATE_COMMAND" '["sh","-c",$c]')"
+          fi
+          overrides="$(jq -nc --arg name "$MAIN_CONTAINER" --argjson cmd "$command" '{containerOverrides: [{name: $name, command: $cmd}]}')"
+
+          # Reuse the service's own placement so the task lands on the same EC2 capacity.
+          strategy="$(aws ecs describe-services --cluster "$CLUSTER" --services "$family" \
+            --query 'services[0].capacityProviderStrategy' --output json)"
+          if test "$(jq 'length' <<<"${strategy:-[]}" 2>/dev/null || echo 0)" -gt 0; then
+            placement=(--capacity-provider-strategy "$strategy")
+          else
+            placement=(--launch-type EC2)
+          fi
+
+          run="$(aws ecs run-task --cluster "$CLUSTER" --task-definition "$arn" --count 1 \
+            --started-by "pi-deliver-${GITHUB_RUN_ID}" --overrides "$overrides" "${placement[@]}" --output json)"
+          failures="$(jq -c '.failures' <<<"$run")"
+          task="$(jq -r '.tasks[0].taskArn // empty' <<<"$run")"
+          test -n "$task" || { echo "::error::Migration task did not start: $failures"; exit 1; }
+          echo "Migration task started: ${task##*/}"
+
+          deadline=$((SECONDS + 1200))
+          while :; do
+            desc="$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$task" --output json)"
+            status="$(jq -r '.tasks[0].lastStatus' <<<"$desc")"
+            test "$status" = "STOPPED" && break
+            if test "$SECONDS" -ge "$deadline"; then
+              aws ecs stop-task --cluster "$CLUSTER" --task "$task" --reason "pi-deliver migration timeout" >/dev/null || true
+              echo "::error::Migration did not finish within 20 minutes."
+              exit 1
+            fi
+            sleep 10
+          done
+          code="$(jq -r --arg name "$MAIN_CONTAINER" '.tasks[0].containers[] | select(.name == $name) | .exitCode // "none"' <<<"$desc")"
+          reason="$(jq -r '.tasks[0].stoppedReason // ""' <<<"$desc")"
+          group="$(jq -r --arg name "$MAIN_CONTAINER" '.containerDefinitions[] | select(.name == $name) | .logConfiguration.options["awslogs-group"] // ""' "$workdir/${family}.json")"
+          echo "Migration exit code: ${code} (${reason}). Logs: ${group:-n/a} (stream prefix ecs/${MAIN_CONTAINER}/${task##*/})"
+          test "$code" = "0" || { echo "::error::Migration failed with exit code ${code}. ${reason}"; exit 1; }
+
+      - name: Roll services and wait for a stable deployment
+        shell: bash
+        env:
+          DEPLOY: ${{ steps.register.outputs.deploy }}
+        run: |
+          set -euo pipefail
+          while read -r item; do
+            family="$(jq -r .family <<<"$item")"
+            arn="$(jq -r .arn <<<"$item")"
+            aws ecs update-service --cluster "$CLUSTER" --service "$family" --task-definition "$arn" >/dev/null
+            echo "Updated ${family} -> ${arn##*/}"
+          done < <(jq -c '.[]' <<<"$DEPLOY")
+
+          # The gate is the PRIMARY deployment of the revision we just registered
+          # reaching COMPLETED. aws ecs wait services-stable is not enough: after a
+          # circuit-breaker rollback the service is "stable" on the old revision.
+          deadline=$((SECONDS + STABLE_MINUTES * 60))
+          while read -r item; do
+            family="$(jq -r .family <<<"$item")"
+            arn="$(jq -r .arn <<<"$item")"
+            while :; do
+              svc="$(aws ecs describe-services --cluster "$CLUSTER" --services "$family" --output json | jq -c '.services[0]')"
+              failed="$(jq -r --arg arn "$arn" '[.deployments[] | select(.taskDefinition == $arn and .rolloutState == "FAILED")] | length' <<<"$svc")"
+              if test "$failed" -gt 0; then
+                jq -r '.events[0:8][] | "  \(.createdAt) \(.message)"' <<<"$svc"
+                echo "::error::${family} deployment of ${arn##*/} failed and was rolled back by the circuit breaker."
+                exit 1
+              fi
+              ok="$(jq -r --arg arn "$arn" '
+                  (.deployments | length) == 1
+                  and .deployments[0].taskDefinition == $arn
+                  and .deployments[0].status == "PRIMARY"
+                  and ((.deployments[0].rolloutState // "COMPLETED") == "COMPLETED")
+                  and .runningCount == .desiredCount' <<<"$svc")"
+              if test "$ok" = "true"; then
+                echo "${family} is stable on ${arn##*/} ($(jq -r .runningCount <<<"$svc") running)."
+                break
+              fi
+              if test "$SECONDS" -ge "$deadline"; then
+                jq -r '.events[0:8][] | "  \(.createdAt) \(.message)"' <<<"$svc"
+                echo "::error::${family} did not become stable within ${STABLE_MINUTES} minutes."
+                exit 1
+              fi
+              sleep 15
+            done
+          done < <(jq -c '.[]' <<<"$DEPLOY")
+
+      - name: Cut the release (annotated tag and GitHub Release)
+        if: matrix.env == fromJSON(inputs.environments)[0]
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/${SOURCE_REPOSITORY}"
+          call() { curl -sS -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "$@"; }
+          status="$(call -o /dev/null -w '%{http_code}' "${api}/git/ref/tags/${VERSION}")"
+          if test "$status" = "404"; then
+            tag_sha="$(call -X POST "${api}/git/tags" -d "$(jq -nc --arg tag "$VERSION" --arg sha "$SOURCE_SHA" \
+              '{tag:$tag, message:("Release " + $tag), object:$sha, type:"commit"}')" | jq -r '.sha // empty')"
+            test -n "$tag_sha" || { echo "::error::Could not create tag object ${VERSION}."; exit 1; }
+            call -f -o /dev/null -X POST "${api}/git/refs" -d "$(jq -nc --arg ref "refs/tags/${VERSION}" --arg sha "$tag_sha" '{ref:$ref, sha:$sha}')"
+            echo "Created tag ${VERSION}"
+          elif test "$status" = "200"; then
+            echo "Tag ${VERSION} already exists."
+          else
+            echo "::error::Unexpected HTTP ${status} reading tag ${VERSION}."; exit 1
+          fi
+
+          status="$(call -o /dev/null -w '%{http_code}' "${api}/releases/tags/${VERSION}")"
+          if test "$status" = "404"; then
+            body="$(jq -r '"Images (linux/arm64), deployed by digest:\n" + ([.[] | "- `\(.repo)@\(.digest)`"] | join("\n"))' <<<"$IMAGES")"
+            body="${body}"$'\n\n'"Commit: ${SOURCE_SHA}"$'\n'"Workflow run: ${RUN_URL}"
+            call -f -o /dev/null -X POST "${api}/releases" -d "$(jq -nc --arg tag "$VERSION" --arg body "$body" \
+              '{tag_name:$tag, name:$tag, body:$body, generate_release_notes:true, make_latest:"true"}')"
+            echo "Created GitHub Release ${VERSION}"
+          elif test "$status" = "200"; then
+            echo "Release ${VERSION} already exists."
+          else
+            echo "::error::Unexpected HTTP ${status} reading release ${VERSION}."; exit 1
+          fi
+
+      - name: Job summary
+        if: always()
+        shell: bash
+        env:
+          DEPLOY: ${{ steps.register.outputs.deploy }}
+        run: |
+          {
+            echo "### Deploy ${DEPLOY_ENV}"
+            echo
+            echo "- Release: \`${VERSION}\` (\`${SOURCE_SHA}\`)"
+            jq -r '.[] | "- Image: `\(.repo)@\(.digest)`"' <<<"$IMAGES"
+            if test -n "$DEPLOY"; then jq -r '.[] | "- Task definition: `\(.arn | split("/")[-1])`"' <<<"$DEPLOY"; fi
+          } >> "$GITHUB_STEP_SUMMARY"

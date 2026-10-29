@@ -875,7 +875,9 @@ jobs:
                 echo "::error::${family} did not become stable within ${STABLE_MINUTES} minutes."
                 exit 1
               fi
-              sleep 15
+              # 5 s: a finished roll is noticed within seconds, not up to 15
+              # (tuning review A22). One DescribeServices call per poll.
+              sleep 5
             done
           done < <(jq -c '.[]' <<<"$DEPLOY")
 

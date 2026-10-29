@@ -41,13 +41,13 @@ on:
         description: ECS cluster name.
         type: string
       runner-build:
-        description: runs-on for the image build, as a JSON array of labels. Defaults to the GitHub-hosted ARM runner. Must be an arm64 runner with Docker. Callers should not override it.
+        description: runs-on for the image build, as a JSON array of labels. The default '["codebuild-medium"]' is the org CodeBuild runner on arm1.medium. Must be an arm64 runner with Docker. Callers should not override it.
         type: string
-        default: '["ubuntu-24.04-arm"]'
+        default: '["codebuild-medium"]'
       runner-small:
         description: runs-on for the deploy jobs (same format as runner-build).
         type: string
-        default: '["ubuntu-24.04-arm"]'
+        default: '["codebuild"]'
       images:
         description: JSON list of {name, dockerfile, context[, container]}. name is the ECR repository suffix (<app>/<name>). container defaults to the main container for name "web" and to name otherwise.
         type: string
@@ -165,7 +165,7 @@ permissions: {}
 jobs:
   mode:
     name: mode
-    runs-on: ${{ fromJSON(inputs.runner-small) }}
+    runs-on: ${{ inputs.runner-small == '["codebuild"]' && format('codebuild-pi-actions-{0}-{1}', github.run_id, github.run_attempt) || fromJSON(inputs.runner-small) }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -262,7 +262,7 @@ jobs:
     name: Cut release
     needs: [mode, gates]
     if: ${{ !inputs.deploy && needs.mode.outputs.mode == 'release' && needs.mode.outputs.dry_run != 'true' && needs.gates.result == 'success' }}
-    runs-on: ${{ fromJSON(inputs.runner-small) }}
+    runs-on: ${{ inputs.runner-small == '["codebuild"]' && format('codebuild-pi-actions-{0}-{1}', github.run_id, github.run_attempt) || fromJSON(inputs.runner-small) }}
     timeout-minutes: 15
     permissions:
       contents: write
@@ -343,7 +343,7 @@ jobs:
     name: Notify
     needs: [mode, gates, deliver, tag]
     if: ${{ always() && needs.mode.outputs.dry_run != 'true' }}
-    runs-on: ${{ fromJSON(inputs.runner-small) }}
+    runs-on: ${{ inputs.runner-small == '["codebuild"]' && format('codebuild-pi-actions-{0}-{1}', github.run_id, github.run_attempt) || fromJSON(inputs.runner-small) }}
     timeout-minutes: 10
     permissions:
       id-token: write

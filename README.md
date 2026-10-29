@@ -4,7 +4,7 @@ Organization defaults, plus the CI/CD standard every active repo follows (Linear
 
 ## CI/CD standard
 
-1. Every GitHub Actions job runs on GitHub-hosted ARM runners: `runs-on: ubuntu-24.04-arm`. Not Marsh/Daytona, not CodeBuild, not x86_64 `ubuntu-latest`. The two exceptions below are the only ones. This is interim until Daytona v2 arm64 access; only the runner label changes then, and it lives in one place (see "Reusable workflows").
+1. Every GitHub Actions job runs on the org's AWS CodeBuild ARM runner (project `pi-actions` in account 490600801675, paid from AWS credits; owner decision 2026-10-28): `runs-on: codebuild-pi-actions-${{ github.run_id }}-${{ github.run_attempt }}`. That is arm1.small (2 vCPU, 4 GiB, Amazon Linux 2023, arm64, Docker). Append `-arm-3.0-medium` for arm1.medium. Not GitHub-hosted (`ubuntu-24.04-arm`, `ubuntu-latest`), not Marsh/Daytona. The exceptions below are the only ones. The reusable workflows hold the label in one place (see "Reusable workflows"); infrastructure is `pi-platform` `docs/codebuild-github-runners.md`.
 2. ECS hosts are Graviton, so images are `linux/arm64`. They build natively on the ARM runner with `docker buildx build --platform linux/arm64`. No QEMU.
 3. `main` takes changes only through pull requests: 0 required approvals, no bypass actors, squash-only, auto-merge on, branch deleted on merge.
 4. One set of workflows, defined here. Heavy work happens only on a production release:
@@ -20,8 +20,8 @@ Two exceptions to the runner and architecture rules. Each repo listed here keeps
 
 | Exception | Repos | Scope |
 |---|---|---|
-| GitHub-hosted macOS and Windows runners (`macos-15`, `windows-latest`) | `boardwalk`, `Sweetgrass` | Only the platform-specific build and release jobs. `boardwalk` builds `Boardwalk.app` in `build.yml` on `macos-15`. `Sweetgrass` builds its npm release binaries in the `build` matrix of `release.yml`: `macos-15` (darwin-arm64, darwin-x64), `ubuntu-24.04` (linux-x64), `windows-latest` (win32-x64). Their `pi-checks`, release publishing and npm publish jobs stay on `ubuntu-24.04-arm`. |
-| `linux/amd64` image on `ubuntu-24.04` | `Mastra` | The image runs on the Meleys k3s node in the homelab, which is x86. It is pushed to ECR (`mastra/agent-hub`) over OIDC, since the homelab registry is not reachable from GitHub-hosted runners. |
+| GitHub-hosted macOS and Windows runners (`macos-15`, `windows-latest`) | `boardwalk`, `Sweetgrass` | Only the platform-specific build and release jobs. `boardwalk` builds `Boardwalk.app` in `build.yml` on `macos-15`. `Sweetgrass` builds its npm release binaries in the `build` matrix of `release.yml`: `macos-15` (darwin-arm64, darwin-x64), `ubuntu-24.04` (linux-x64), `windows-latest` (win32-x64). Both repos stay on GitHub-hosted runners for every job (owner, 2026-10-28), pinned to a pre-CodeBuild `v1` SHA. |
+| `linux/amd64` image on the CodeBuild x86 image (`codebuild-pi-actions-<run_id>-<run_attempt>-linux-5.0-small`) | `Mastra` | The image runs on the Meleys k3s node in the homelab, which is x86. It is pushed to ECR (`mastra/agent-hub`) over OIDC, since the homelab registry is not reachable from the runners. |
 
 A new exception needs a reason that a Linux ARM runner cannot satisfy (an Apple or Windows toolchain, or a non-ARM deploy target). Add the repo to this table in the same pull request that introduces it.
 
@@ -35,16 +35,16 @@ This repository is public, so any repository in the organization can call these 
 | `.github/workflows/pi-deliver.yml` | The ECS engine. `mode: staging` (default): build and deploy staging. `mode: release` and `mode: rollback`: prod, workflow_dispatch from main only. |
 | `.github/workflows/pi-release.yml` | Create Release: heavy gates, then `pi-deliver` in release (or rollback) mode. `deploy: false` runs the gates and cuts a tag only. |
 
-Reusable workflows run on the caller's runners, so every job takes `runs-on` from an input. Each input is a JSON array of labels, read with `fromJSON`, and defaults to the GitHub-hosted ARM runner. Callers pass nothing and do not override it:
+Reusable workflows run on the caller's runners, so every job takes `runs-on` from an input. Each input is a JSON array of labels, read with `fromJSON`. The defaults `["codebuild"]` and `["codebuild-medium"]` expand to the CodeBuild label for the caller's run (`codebuild-pi-actions-<run_id>-<run_attempt>`, plus `-arm-3.0-medium`). Callers pass nothing and do not override it:
 
 | Input | Workflow | Default |
 |---|---|---|
-| `runner-small` | `pi-checks`, `pi-deliver` (deploy jobs), `pi-release` | `'["ubuntu-24.04-arm"]'` |
-| `runner-build` | `pi-deliver` (image build), `pi-release` | `'["ubuntu-24.04-arm"]'` |
+| `runner-small` | `pi-checks`, `pi-deliver` (deploy jobs), `pi-release` | `'["codebuild"]'` (arm1.small) |
+| `runner-build` | `pi-deliver` (image build), `pi-release` | `'["codebuild-medium"]'` (arm1.medium) |
 
-When the Palmetto fleet moves to Daytona v2 arm64, change the two defaults here and nothing else. `pi-deliver` fails the build job if the runner is not arm64.
+To change runners, change the two defaults and the `runs-on` expressions here and nothing else. `pi-deliver` fails the build job if the runner is not arm64.
 
-Cost: the organization Actions budget is $50 a month with prevent-further-usage, and GitHub Team includes 3,000 minutes. `pi-checks` caches package downloads (npm, pnpm, yarn, pip, cargo, and Go through `setup-go`) keyed on the lockfile. Keep your own `install-command` and `test-command` overrides lean for the same reason.
+Cost: CodeBuild bills per minute from AWS credits (arm1.small $0.0034, arm1.medium $0.007), up to 60 concurrent builds per size (extra builds queue), with a $50/month AWS Budget alarm (`pi-platform-codebuild-monthly`). GitHub-hosted minutes are only for the exceptions above. `pi-checks` caches package downloads (npm, pnpm, yarn, pip, cargo, and Go through `setup-go`) keyed on the lockfile. Keep your own `install-command` and `test-command` overrides lean for the same reason.
 
 Workflow templates for new repositories are in `workflow-templates/` (Actions, New workflow, organization section).
 

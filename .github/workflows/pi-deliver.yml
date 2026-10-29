@@ -17,9 +17,11 @@
 # README.md ("CI/CD standard").
 #
 # Reusable workflows run on the CALLER's runners, so every job takes its
-# runs-on from an input (a JSON array of labels, read with fromJSON). Both
-# default to the GitHub-hosted ARM runner (ubuntu-24.04-arm) and callers pass
-# nothing; this file is the one place the label lives. The caller grants
+# runs-on from an input (a JSON array of labels, read with fromJSON). The
+# defaults are the org CodeBuild runner: '["codebuild-medium"]' (arm1.medium)
+# for the image build and '["codebuild"]' (arm1.small) for the deploy jobs,
+# expanded to codebuild-pi-actions-<run_id>-<run_attempt>[-arm-3.0-medium].
+# Callers pass nothing; this file is the one place the label lives. The caller grants
 #   permissions: { contents: write, id-token: write }
 # on the job that calls this workflow (the release job needs contents: write,
 # and a called workflow cannot ask for more than its caller, even in staging
@@ -49,15 +51,15 @@ on:
         required: true
       runner-build:
         description: >-
-          runs-on for the image build, as a JSON array of labels. Defaults to
-          the GitHub-hosted ARM runner. Must be an arm64 runner with Docker.
-          Callers should not override it.
+          runs-on for the image build, as a JSON array of labels. The default
+          '["codebuild-medium"]' is the org CodeBuild runner on arm1.medium.
+          Must be an arm64 runner with Docker. Callers should not override it.
         type: string
-        default: '["ubuntu-24.04-arm"]'
+        default: '["codebuild-medium"]'
       runner-small:
         description: runs-on for the deploy jobs (same format as runner-build).
         type: string
-        default: '["ubuntu-24.04-arm"]'
+        default: '["codebuild"]'
       images:
         description: >-
           JSON list of {name, dockerfile, context[, container]}. name is the ECR
@@ -142,7 +144,7 @@ jobs:
   build:
     name: Build image
     if: vars.ECS_DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/main'
-    runs-on: ${{ fromJSON(inputs.runner-build) }}
+    runs-on: ${{ inputs.runner-build == '["codebuild-medium"]' && format('codebuild-pi-actions-{0}-{1}-arm-3.0-medium', github.run_id, github.run_attempt) || fromJSON(inputs.runner-build) }}
     timeout-minutes: 60
     permissions:
       contents: read
@@ -485,7 +487,7 @@ jobs:
     name: Cut release
     needs: build
     if: inputs.mode == 'release' && github.event.inputs.dry_run != 'true'
-    runs-on: ${{ fromJSON(inputs.runner-small) }}
+    runs-on: ${{ inputs.runner-small == '["codebuild"]' && format('codebuild-pi-actions-{0}-{1}', github.run_id, github.run_attempt) || fromJSON(inputs.runner-small) }}
     timeout-minutes: 15
     permissions:
       contents: write
@@ -609,7 +611,7 @@ jobs:
     needs: [build, release]
     # release is skipped outside release mode; a failed or cancelled release stops prod.
     if: ${{ !cancelled() && needs.build.result == 'success' && (needs.release.result == 'success' || needs.release.result == 'skipped') && (inputs.has-staging || inputs.mode != 'staging') && github.event.inputs.dry_run != 'true' }}
-    runs-on: ${{ fromJSON(inputs.runner-small) }}
+    runs-on: ${{ inputs.runner-small == '["codebuild"]' && format('codebuild-pi-actions-{0}-{1}', github.run_id, github.run_attempt) || fromJSON(inputs.runner-small) }}
     timeout-minutes: 90
     permissions:
       contents: read

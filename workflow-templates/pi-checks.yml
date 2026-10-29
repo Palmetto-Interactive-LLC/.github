@@ -1,7 +1,7 @@
 # Palmetto standard LIGHT pull-request checks (lint, typecheck, quick tests, secret
 # scan of the PR's commits; docs-only changes exit fast). The heavy gates run in
 # Create Release. Calls the central reusable workflow, which runs on
-# the GitHub-hosted ARM runner (ubuntu-24.04-arm). Do not override runner-small:
+# the org CodeBuild ARM runner (codebuild-pi-actions). Do not override runner-small:
 # the label lives in the central workflow.
 # The required status check for main is "pi-checks / pi-checks", so keep the job id.
 name: PI Checks

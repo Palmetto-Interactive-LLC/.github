@@ -1,6 +1,6 @@
 {
   "name": "PI Checks",
-  "description": "Palmetto standard LIGHT pull-request checks on the GitHub-hosted ARM runner: install, lint, typecheck, quick tests, a secret scan of the PR's commits, and the aggregate pi-checks gate. Heavy gates run in Create Release.",
+  "description": "Palmetto standard LIGHT pull-request checks on the org CodeBuild ARM runner: install, lint, typecheck, quick tests, a secret scan of the PR's commits, and the aggregate pi-checks gate. Heavy gates run in Create Release.",
   "iconName": "octicon checklist",
   "categories": [
     "Continuous integration"

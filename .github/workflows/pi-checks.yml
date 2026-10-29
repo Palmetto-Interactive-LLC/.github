@@ -3,10 +3,11 @@
 #
 # Reusable workflows run on the CALLER's runners, so every job takes its
 # runs-on from the runner-small input: a JSON array of labels read with
-# fromJSON. The default is the GitHub-hosted ARM runner (ubuntu-24.04-arm), so
-# callers pass nothing. This is the one place the label lives: when the fleet
-# moves to Daytona v2 arm64, change the default here. The tool installers below
-# pick the right binary for arm64 or x86_64.
+# fromJSON. The default '["codebuild"]' is expanded to the org CodeBuild runner
+# label, codebuild-pi-actions-<run_id>-<run_attempt> (arm1.small, Amazon Linux
+# 2023, arm64), which CodeBuild needs per run. Callers pass nothing; this is the
+# one place the label lives. The tool installers below pick the right binary
+# for arm64 or x86_64.
 #
 # Every caller-supplied value reaches a shell through env:, never inline in run:.
 name: PI Checks
@@ -32,10 +33,11 @@ on:
         default: pr
       runner-small:
         description: >-
-          runs-on for every job, as a JSON array of labels. Defaults to the
-          GitHub-hosted ARM runner. Callers should not override it.
+          runs-on for every job, as a JSON array of labels. The default
+          '["codebuild"]' means the org CodeBuild runner on arm1.small.
+          Callers should not override it.
         type: string
-        default: '["ubuntu-24.04-arm"]'
+        default: '["codebuild"]'
       stack:
         description: "Toolchain and default commands: node | python | go | rust | tofu | docs"
         type: string
@@ -119,7 +121,7 @@ jobs:
   # licenses, images) skip every other job. Release mode never skips.
   changes:
     name: changes
-    runs-on: ${{ fromJSON(inputs.runner-small) }}
+    runs-on: ${{ inputs.runner-small == '["codebuild"]' && format('codebuild-pi-actions-{0}-{1}', github.run_id, github.run_attempt) || fromJSON(inputs.runner-small) }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -163,7 +165,7 @@ jobs:
     name: quick
     needs: changes
     if: needs.changes.outputs.docs_only != 'true'
-    runs-on: ${{ fromJSON(inputs.runner-small) }}
+    runs-on: ${{ inputs.runner-small == '["codebuild"]' && format('codebuild-pi-actions-{0}-{1}', github.run_id, github.run_attempt) || fromJSON(inputs.runner-small) }}
     timeout-minutes: 30
     permissions:
       contents: read
@@ -230,11 +232,27 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
 
+      # actions/setup-python ships Ubuntu builds only and fails on the CodeBuild
+      # runner's Amazon Linux 2023 image. uv installs a standalone CPython and a
+      # venv (with pip) that the rest of the job uses as "python".
+      - name: Set up uv
+        if: inputs.stack == 'python'
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: false
+
       - name: Set up Python
         if: inputs.stack == 'python'
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: ${{ inputs.python-version }}
+        shell: bash
+        env:
+          PYTHON_VERSION: ${{ inputs.python-version }}
+        run: |
+          set -euo pipefail
+          venv="$RUNNER_TEMP/python-venv"
+          uv venv --seed --python "$PYTHON_VERSION" "$venv"
+          echo "VIRTUAL_ENV=$venv" >> "$GITHUB_ENV"
+          echo "$venv/bin" >> "$GITHUB_PATH"
+          "$venv/bin/python" --version
 
       - name: Set up Go (version from input)
         if: inputs.stack == 'go' && inputs.go-version != ''
@@ -376,7 +394,7 @@ jobs:
     name: secrets
     needs: changes
     if: needs.changes.outputs.docs_only != 'true'
-    runs-on: ${{ fromJSON(inputs.runner-small) }}
+    runs-on: ${{ inputs.runner-small == '["codebuild"]' && format('codebuild-pi-actions-{0}-{1}', github.run_id, github.run_attempt) || fromJSON(inputs.runner-small) }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -426,7 +444,7 @@ jobs:
   deps:
     name: deps
     if: inputs.mode == 'release'
-    runs-on: ${{ fromJSON(inputs.runner-small) }}
+    runs-on: ${{ inputs.runner-small == '["codebuild"]' && format('codebuild-pi-actions-{0}-{1}', github.run_id, github.run_attempt) || fromJSON(inputs.runner-small) }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -497,7 +515,7 @@ jobs:
     name: actions
     needs: changes
     if: inputs.mode == 'release' || needs.changes.outputs.workflows == 'true'
-    runs-on: ${{ fromJSON(inputs.runner-small) }}
+    runs-on: ${{ inputs.runner-small == '["codebuild"]' && format('codebuild-pi-actions-{0}-{1}', github.run_id, github.run_attempt) || fromJSON(inputs.runner-small) }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -508,11 +526,27 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
+      # actions/setup-python ships Ubuntu builds only and fails on the CodeBuild
+      # runner's Amazon Linux 2023 image. uv installs a standalone CPython and a
+      # venv (with pip) that the rest of the job uses as "python".
+      - name: Set up uv
+        if: inputs.mode == 'release'
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: false
+
       - name: Set up Python
         if: inputs.mode == 'release'
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: "3.12"
+        shell: bash
+        env:
+          PYTHON_VERSION: "3.12"
+        run: |
+          set -euo pipefail
+          venv="$RUNNER_TEMP/python-venv"
+          uv venv --seed --python "$PYTHON_VERSION" "$venv"
+          echo "VIRTUAL_ENV=$venv" >> "$GITHUB_ENV"
+          echo "$venv/bin" >> "$GITHUB_PATH"
+          "$venv/bin/python" --version
 
       - name: Install actionlint and zizmor
         shell: bash
@@ -555,7 +589,7 @@ jobs:
     name: pi-checks
     if: always()
     needs: [changes, quick, secrets, deps, actions]
-    runs-on: ${{ fromJSON(inputs.runner-small) }}
+    runs-on: ${{ inputs.runner-small == '["codebuild"]' && format('codebuild-pi-actions-{0}-{1}', github.run_id, github.run_attempt) || fromJSON(inputs.runner-small) }}
     timeout-minutes: 5
     permissions: {}
     env:

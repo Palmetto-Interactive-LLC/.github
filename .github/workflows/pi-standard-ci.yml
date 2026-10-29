@@ -15,7 +15,7 @@ concurrency:
 jobs:
   lint:
     name: lint
-    runs-on: ubuntu-24.04-arm
+    runs-on: codebuild-pi-actions-${{ github.run_id }}-${{ github.run_attempt }}
     permissions:
       contents: read
     steps:
@@ -73,7 +73,7 @@ jobs:
 
   build-test:
     name: build-test
-    runs-on: ubuntu-24.04-arm
+    runs-on: codebuild-pi-actions-${{ github.run_id }}-${{ github.run_attempt }}
     permissions:
       contents: read
     steps:

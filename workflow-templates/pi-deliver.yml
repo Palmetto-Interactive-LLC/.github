@@ -2,7 +2,7 @@
 # image, push it to ECR by full git SHA, deploy STAGING and wait for it to be
 # stable. Production is never deployed from here; it goes out only through the
 # manual "Create Release" workflow (create-release.yml).
-# Runs on the GitHub-hosted ARM runner (ubuntu-24.04-arm); arm64 images build natively
+# Runs on the org CodeBuild ARM runner (codebuild-pi-actions); arm64 images build natively
 # with buildx. Do not override the runner inputs: the label lives in the central workflow.
 # Replace __APP__ (ECR <app>/web, services <app>-staging and <app>-prod) and
 # __CLUSTER__ (the ECS cluster).

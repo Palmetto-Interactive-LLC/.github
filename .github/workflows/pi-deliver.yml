@@ -314,10 +314,22 @@ jobs:
               echo "::group::Build ${repo} (linux/arm64)"
               labels=(--label "org.opencontainers.image.revision=${SOURCE_SHA}"
                       --label "org.opencontainers.image.source=https://github.com/${SOURCE_REPOSITORY}")
+              # Layer cache in the same ECR repo. Tags there are immutable, so
+              # each build writes its own buildcache-<sha> tag and the next build
+              # reads the newest one. A missing cache is a warning, and
+              # ignore-error keeps a failed cache push from failing the build.
+              cache_tag="$(aws ecr describe-images --repository-name "$repo" --region "$AWS_REGION" --output json \
+                | jq -r '[.imageDetails[] | select(.imageTags // [] | any(startswith("buildcache-")))]
+                         | sort_by(.imagePushedAt) | (last // {}) | (.imageTags // []) | map(select(startswith("buildcache-"))) | first // empty' || true)"
+              cache_args=(--cache-to "type=registry,ref=${REGISTRY}/${repo}:buildcache-${SOURCE_SHA},mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true")
+              if test -n "$cache_tag"; then
+                echo "Using layer cache ${repo}:${cache_tag}"
+                cache_args+=(--cache-from "type=registry,ref=${REGISTRY}/${repo}:${cache_tag}")
+              fi
               # One plain image manifest: no attestation index, so the digest we
               # promote to prod is the image itself.
               docker buildx build --platform linux/arm64 --provenance=false --sbom=false \
-                "${labels[@]}" --file "$dockerfile" --tag "$uri" --push "$context"
+                "${labels[@]}" "${cache_args[@]}" --file "$dockerfile" --tag "$uri" --push "$context"
               echo "::endgroup::"
             else
               cat "$err"

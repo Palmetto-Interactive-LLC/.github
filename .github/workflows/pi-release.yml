@@ -207,6 +207,34 @@ jobs:
             *) echo "::error::Could not check ${RELEASE_SHA} against main (HTTP ${code})."; exit 1 ;;
           esac
           case "$rel" in identical|ahead) ;; *) echo "::error::commit ${RELEASE_SHA} is not on main (compare says '${rel}')."; exit 1;; esac
+          # BEGIN workflows-match-main
+          # GITHUB_TOKEN can't tag a commit whose .github/workflows differs from
+          # main's: GitHub answers 403 "Resource not accessible by integration" to
+          # git/refs and to /releases alike, because the token never holds the
+          # workflows permission (verified 2026-10-29). Refuse here, before the
+          # gates, instead of failing at the tag after them.
+          # Tested by scripts/tests/pi-release-workflows-check.sh.
+          wf_tree() {
+            local code
+            code="$(curl -sS -o "$RUNNER_TEMP/github-dir.json" -w '%{http_code}' -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/.github?ref=$1")" || code=000
+            case "$code" in
+              200) jq -r '[.[] | select(.name == "workflows" and .type == "dir") | .sha][0] // "none"' "$RUNNER_TEMP/github-dir.json" ;;
+              404) echo none ;;
+              *) echo "::error::Could not read .github at $1 (HTTP ${code})."; return 1 ;;
+            esac
+          }
+          release_tree="$(wf_tree "$RELEASE_SHA")" || { echo "$release_tree"; exit 1; }
+          main_tree="$(wf_tree main)" || { echo "$main_tree"; exit 1; }
+          if test "$release_tree" != "$main_tree"; then
+            msg="main changed .github/workflows after ${RELEASE_SHA:0:12}, and GitHub won't let this run's token tag a commit whose workflows differ from main's. Release main's head instead (leave sha empty)."
+            if test "$DRY_RUN" = "true"; then
+              echo "::warning::${msg} A real release of this commit would stop here."
+            else
+              echo "::error::${msg}"; exit 1
+            fi
+          fi
+          # END workflows-match-main
           echo "sha=${RELEASE_SHA}" >> "$GITHUB_OUTPUT"
 
   gates:
@@ -285,12 +313,12 @@ jobs:
             local method="$1" url="$2" data="${3:-}" try
             for try in 1 2 3 4 5; do
               if test -n "$data"; then
-                body="$(curl -sS -X "$method" -w '\n%{http_code}' -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "$url" -d "$data")"
+                body="$(curl -sS -X "$method" -w '\n%{http_code}' -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "$url" -d "$data")" || body=$'\n000'
               else
-                body="$(curl -sS -X "$method" -w '\n%{http_code}' -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "$url")"
+                body="$(curl -sS -X "$method" -w '\n%{http_code}' -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "$url")" || body=$'\n000'
               fi
               code="${body##*$'\n'}"; body="${body%$'\n'*}"
-              case "$code" in 403|429|500|502|503|504) echo "::warning::${method} ${url} returned ${code} (attempt ${try}/5): ${body:0:300}"; sleep $((try * 5));; *) return 0;; esac
+              case "$code" in 000|403|429|500|502|503|504) echo "::warning::${method} ${url} returned ${code} (attempt ${try}/5): ${body:0:300}"; sleep $((try * 5));; *) return 0;; esac
             done
           }
           # Head check: a release is always of the head of main.
@@ -316,7 +344,12 @@ jobs:
             tag_sha="$(jq -r '.sha // empty' <<<"$body")"
             test -n "$tag_sha" || { echo "::error::Could not create tag object ${VERSION} (HTTP ${code}): ${body:0:300}"; exit 1; }
             req POST "${api}/git/refs" "$(jq -nc --arg ref "refs/tags/${VERSION}" --arg sha "$tag_sha" '{ref:$ref, sha:$sha}')"
-            case "$code" in 201) echo "Created tag ${VERSION}";; 422) echo "Tag ${VERSION} was created by a concurrent attempt.";; *) echo "::error::Could not create tag ${VERSION} (HTTP ${code}): ${body:0:300}"; exit 1;; esac
+            case "$code" in
+              201) echo "Created tag ${VERSION}";;
+              422) echo "Tag ${VERSION} was created by a concurrent attempt.";;
+              403) echo "::error::Could not create tag ${VERSION}: main changed .github/workflows after this commit, and GitHub refuses this token a tag on a commit whose workflows differ from main's (403 Resource not accessible by integration). Release main's head instead."; exit 1;;
+              *) echo "::error::Could not create tag ${VERSION} (HTTP ${code}): ${body:0:300}"; exit 1;;
+            esac
           elif test "$code" != "200"; then
             echo "::error::Unexpected HTTP ${code} reading tag ${VERSION}: ${body:0:300}"; exit 1
           fi

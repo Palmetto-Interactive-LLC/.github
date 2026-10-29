@@ -550,12 +550,12 @@ jobs:
             local method="$1" url="$2" data="${3:-}" try
             for try in 1 2 3 4 5; do
               if test -n "$data"; then
-                body="$(curl -sS -X "$method" -w '\n%{http_code}' -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "$url" -d "$data")"
+                body="$(curl -sS -X "$method" -w '\n%{http_code}' -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "$url" -d "$data")" || body=$'\n000'
               else
-                body="$(curl -sS -X "$method" -w '\n%{http_code}' -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "$url")"
+                body="$(curl -sS -X "$method" -w '\n%{http_code}' -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "$url")" || body=$'\n000'
               fi
               code="${body##*$'\n'}"; body="${body%$'\n'*}"
-              case "$code" in 403|429|500|502|503|504) echo "::warning::${method} ${url} returned ${code} (attempt ${try}/5): ${body:0:300}"; sleep $((try * 5));; *) return 0;; esac
+              case "$code" in 000|403|429|500|502|503|504) echo "::warning::${method} ${url} returned ${code} (attempt ${try}/5): ${body:0:300}"; sleep $((try * 5));; *) return 0;; esac
             done
           }
 
@@ -573,6 +573,8 @@ jobs:
             req POST "${api}/git/refs" "$(jq -nc --arg ref "refs/tags/${VERSION}" --arg sha "$tag_sha" '{ref:$ref, sha:$sha}')"
             if test "$code" = "422"; then
               echo "Tag ${VERSION} was created by a concurrent attempt."
+            elif test "$code" = "403"; then
+              echo "::error::Could not create tag ${VERSION}: main changed .github/workflows after this commit, and GitHub refuses this token a tag on a commit whose workflows differ from main's (403 Resource not accessible by integration). Release main's head instead."; exit 1
             elif test "$code" != "201"; then
               echo "::error::Could not create tag ${VERSION} (HTTP ${code}): ${body:0:300}"; exit 1
             else

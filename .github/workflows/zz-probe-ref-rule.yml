@@ -1,0 +1,42 @@
+# Throwaway probe (never merged): which ways of tagging an older commit does
+# GITHUB_TOKEN accept when that commit's .github/workflows differ from main?
+name: zz probe ref rule
+
+on:
+  pull_request:
+    paths: [".github/workflows/zz-probe-ref-rule.yml"]
+
+permissions: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Probe
+        shell: bash
+        run: |
+          set -uo pipefail
+          api="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          call() { curl -sS -o /tmp/b -w '%{http_code}' -X "$1" -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "$api$2" ${3:+-d "$3"}; }
+          OLD="$(curl -sS -H "Authorization: Bearer ${GH_TOKEN}" "$api/commits/5b0de65" | jq -r .sha)"
+          MAIN="$(curl -sS -H "Authorization: Bearer ${GH_TOKEN}" "$api/git/ref/heads/main" | jq -r .object.sha)"
+          echo "old=$OLD main=$MAIN"
+          s="${GITHUB_RUN_ID}"
+          echo "A lightweight ref -> old commit: $(call POST /git/refs "{\"ref\":\"refs/tags/zz-probe-a-$s\",\"sha\":\"$OLD\"}") $(head -c 160 /tmp/b | tr '\n' ' ')"
+          echo "B lightweight ref -> main head:  $(call POST /git/refs "{\"ref\":\"refs/tags/zz-probe-b-$s\",\"sha\":\"$MAIN\"}") $(head -c 160 /tmp/b | tr '\n' ' ')"
+          tagobj="$(curl -sS -X POST -H "Authorization: Bearer ${GH_TOKEN}" "$api/git/tags" -d "{\"tag\":\"zz-probe-c-$s\",\"message\":\"probe\",\"object\":\"$OLD\",\"type\":\"commit\"}" | jq -r .sha)"
+          echo "C annotated tag object old: $tagobj; ref: $(call POST /git/refs "{\"ref\":\"refs/tags/zz-probe-c-$s\",\"sha\":\"$tagobj\"}") $(head -c 160 /tmp/b | tr '\n' ' ')"
+          echo "D release target_commitish=old: $(call POST /releases "{\"tag_name\":\"zz-probe-d-$s\",\"target_commitish\":\"$OLD\",\"name\":\"probe\",\"prerelease\":true,\"make_latest\":\"false\"}") $(jq -c '{id,tag_name,message}' /tmp/b 2>/dev/null | head -c 200)"
+          rid="$(jq -r '.id // empty' /tmp/b)"
+          echo "E draft release target old: $(call POST /releases "{\"tag_name\":\"zz-probe-e-$s\",\"target_commitish\":\"$OLD\",\"name\":\"probe\",\"draft\":true,\"make_latest\":\"false\"}") $(jq -c '{id,message}' /tmp/b 2>/dev/null)"
+          eid="$(jq -r '.id // empty' /tmp/b)"
+          test -n "$eid" && echo "E publish draft: $(call PATCH /releases/$eid '{"draft":false,"prerelease":true,"make_latest":"false"}') $(jq -c '{tag_name,message}' /tmp/b 2>/dev/null)"
+          for t in a b c d e; do echo "tag zz-probe-$t: $(call GET /git/ref/tags/zz-probe-$t-$s) $(jq -r '.object.sha // .message' /tmp/b)"; done
+          # Clean up everything the probe made.
+          for id in $rid $eid; do echo "delete release $id: $(call DELETE /releases/$id)"; done
+          for t in a b c d e; do echo "delete tag zz-probe-$t: $(call DELETE /git/refs/tags/zz-probe-$t-$s)"; done

@@ -98,8 +98,6 @@ Inputs: `app`, `cluster` (both required), `mode`, `runner-build`, `runner-small`
 
 The calling job needs `permissions: { contents: write, id-token: write }` (the release job asks for `contents: write`, and a called workflow cannot ask for more than its caller) and must not use a GitHub `environment:` (it changes the OIDC subject the deploy role trusts).
 
-**Build cache.** Each staging build writes its layers to `<app>/<name>:buildcache-<sha>` (registry cache, `mode=max`) and reads the newest `buildcache-*` tag of that repository. Tags are immutable, so the cache gets a new tag every build. Those images count against the ECR lifecycle's 300-image limit and age out with it. A missing cache or a failed cache push never fails the build.
-
 Repository variables, set by pi-platform: `ECS_DEPLOY_ENABLED` (`true` turns delivery on; otherwise the workflow does nothing), `PI_PLATFORM_IMAGE_PUSH_ROLE_ARN` (ECR push, build job), `ECS_DEPLOY_ROLE_ARN` (deploy jobs).
 
 **Modes**

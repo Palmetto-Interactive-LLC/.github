@@ -17,3 +17,19 @@ jobs:
     uses: ./.github/workflows/pi-checks.yml
     with:
       stack: docs
+
+  # Runs the shipped workflows-match-main check from pi-release.yml against a
+  # fake GitHub API (scripts/tests/pi-release-workflows-check.sh).
+  pi-release-tests:
+    runs-on: codebuild-pi-actions-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: pi-release workflows check
+        run: bash scripts/tests/pi-release-workflows-check.sh

@@ -20,8 +20,7 @@ Two exceptions to the runner and architecture rules. Each repo listed here keeps
 
 | Exception | Repos | Scope |
 |---|---|---|
-| GitHub-hosted macOS and Windows runners (`macos-15`, `windows-latest`) | `boardwalk`, `Sweetgrass` | Only the platform-specific build and release jobs. `boardwalk` builds `Boardwalk.app` in `build.yml` on `macos-15`. `Sweetgrass` builds its npm release binaries in the `build` matrix of `release.yml`: `macos-15` (darwin-arm64, darwin-x64), `ubuntu-24.04` (linux-x64), `windows-latest` (win32-x64). Both repos stay on GitHub-hosted runners for every job (owner, 2026-10-28), pinned to a pre-CodeBuild `v1` SHA. |
-| `linux/amd64` image on the CodeBuild x86 image (`codebuild-pi-actions-<run_id>-<run_attempt>-linux-5.0-small`) | `Mastra` | The image runs on the Meleys k3s node in the homelab, which is x86. It is pushed to ECR (`mastra/agent-hub`) over OIDC, since the homelab registry is not reachable from the runners. |
+| GitHub-hosted macOS and Windows runners (`macos-15`, `windows-latest`) | `boardwalk`, `Sweetgrass` (public) | Only these jobs; every other job in both repos runs on CodeBuild. `boardwalk` builds `Boardwalk.app` in `build.yml` on `macos-15`. `Sweetgrass` builds its npm release binaries in the `build` matrix of `release.yml` on `macos-15` (darwin-arm64, darwin-x64) and `windows-latest` (win32-x64); its linux-x64 leg runs on CodeBuild `-ubuntu-7.0-medium`. CodeBuild has macOS only on reserved Mac fleets, and its Windows image has no MSVC C++ build tools. Hosted runners are free for public repos, so the $0 Actions budget does not stop them. |
 
 A new exception needs a reason that a Linux ARM runner cannot satisfy (an Apple or Windows toolchain, or a non-ARM deploy target). Add the repo to this table in the same pull request that introduces it.
 
@@ -44,7 +43,7 @@ Reusable workflows run on the caller's runners, so every job takes `runs-on` fro
 
 To change runners, change the two defaults and the `runs-on` expressions here and nothing else. `pi-deliver` fails the build job if the runner is not arm64.
 
-Cost: CodeBuild bills per minute from AWS credits (arm1.small $0.0034, arm1.medium $0.007), up to 60 concurrent builds per size (extra builds queue), with a $50/month AWS Budget alarm (`pi-platform-codebuild-monthly`). GitHub-hosted minutes are only for the exceptions above. `pi-checks` caches package downloads (npm, pnpm, yarn, pip, cargo, and Go through `setup-go`) keyed on the lockfile. Keep your own `install-command` and `test-command` overrides lean for the same reason.
+Cost: CodeBuild bills per minute from AWS credits (arm1.small $0.0034, arm1.medium $0.007), up to 60 concurrent builds per size (extra builds queue), with a $50/month AWS Budget alarm (`pi-platform-codebuild-monthly`). The organization's GitHub Actions budget is $0 with stop-on-limit (owner, 2026-10-29), so a private-repo job on a GitHub-hosted runner does not run; GitHub-hosted runners are only for the public-repo exceptions above. `pi-checks` caches package downloads (npm, pnpm, yarn, pip, cargo, and Go through `setup-go`) keyed on the lockfile. Keep your own `install-command` and `test-command` overrides lean for the same reason.
 
 Workflow templates for new repositories are in `workflow-templates/` (Actions, New workflow, organization section).
 

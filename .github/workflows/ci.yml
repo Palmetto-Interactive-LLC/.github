@@ -41,3 +41,6 @@ jobs:
 
       - name: pi-deliver staging wake
         run: bash scripts/tests/pi-deliver-staging-wake.sh
+
+      - name: pi-deliver secret guard
+        run: bash scripts/tests/pi-deliver-secret-guard.sh

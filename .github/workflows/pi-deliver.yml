@@ -845,7 +845,19 @@ jobs:
               failed="$(jq -r --arg arn "$arn" '[.deployments[] | select(.taskDefinition == $arn and .rolloutState == "FAILED")] | length' <<<"$svc")"
               if test "$failed" -gt 0; then
                 jq -r '.events[0:8][] | "  \(.createdAt) \(.message)"' <<<"$svc"
-                echo "::error::${family} deployment of ${arn##*/} failed and was rolled back by the circuit breaker."
+                # BEGIN rollback-cause
+                # Say what failed the deployment: a deploy-gate alarm (the new
+                # tasks served 5xx or logged errors) or the circuit breaker (they
+                # failed to start or failed their health checks). ECS rolled back.
+                # Tested by scripts/tests/pi-deliver-rollback-cause.sh.
+                reason="$(jq -r --arg arn "$arn" '[.deployments[] | select(.taskDefinition == $arn and .rolloutState == "FAILED")][0].rolloutStateReason // ""' <<<"$svc")"
+                case "$reason" in
+                  *[Aa]larm*) cause="a deployment alarm went to ALARM, so the new tasks served 5xx or logged errors (gates: $(jq -r '(.deploymentConfiguration.alarms.alarmNames // []) | join(", ")' <<<"$svc"))" ;;
+                  *"circuit breaker"*) cause="the circuit breaker stopped it: the new tasks failed to start or failed their health checks" ;;
+                  *) cause="ECS failed the deployment" ;;
+                esac
+                echo "::error::${family} deployment of ${arn##*/} failed and ECS rolled it back: ${cause}. ECS: ${reason:-no reason given}"
+                # END rollback-cause
                 exit 1
               fi
               ok="$(jq -r --arg arn "$arn" '

@@ -829,7 +829,21 @@ jobs:
           while read -r item; do
             family="$(jq -r .family <<<"$item")"
             arn="$(jq -r .arn <<<"$item")"
-            aws ecs update-service --cluster "$CLUSTER" --service "$family" --task-definition "$arn" >/dev/null
+            # Staging sleeps at 0 tasks (pi-platform staging-sleeper puts it back
+            # to 0 a few hours after its newest task started). A deploy wakes it to
+            # at least one task, or the roll below would pass on 0/0 without the
+            # new image ever starting. Tested by scripts/tests/pi-deliver-staging-wake.sh.
+            # BEGIN staging-wake
+            count=()
+            if test "$DEPLOY_ENV" = "staging"; then
+              desired="$(aws ecs describe-services --cluster "$CLUSTER" --services "$family" --query 'services[0].desiredCount' --output text)"
+              if test "$desired" = "0"; then
+                count=(--desired-count 1)
+                echo "${family} is asleep (0 tasks); waking it to 1."
+              fi
+            fi
+            # END staging-wake
+            aws ecs update-service --cluster "$CLUSTER" --service "$family" --task-definition "$arn" ${count[@]+"${count[@]}"} >/dev/null
             echo "Updated ${family} -> ${arn##*/}"
           done < <(jq -c '.[]' <<<"$DEPLOY")
 
@@ -865,7 +879,8 @@ jobs:
                   and .deployments[0].taskDefinition == $arn
                   and .deployments[0].status == "PRIMARY"
                   and ((.deployments[0].rolloutState // "COMPLETED") == "COMPLETED")
-                  and .runningCount == .desiredCount' <<<"$svc")"
+                  and .runningCount == .desiredCount
+                  and .desiredCount >= 1' <<<"$svc")"
               if test "$ok" = "true"; then
                 echo "${family} is stable on ${arn##*/} ($(jq -r .runningCount <<<"$svc") running)."
                 break

@@ -20,7 +20,8 @@ jobs:
 
   # Runs shipped snippets against fakes: the workflows-match-main check from
   # pi-release.yml (scripts/tests/pi-release-workflows-check.sh) and the
-  # rollback-cause message from pi-deliver.yml (pi-deliver-rollback-cause.sh).
+  # rollback-cause message from pi-deliver.yml (pi-deliver-rollback-cause.sh)
+  # and the staging wake (pi-deliver-staging-wake.sh).
   pi-release-tests:
     runs-on: codebuild-pi-actions-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 5
@@ -37,3 +38,6 @@ jobs:
 
       - name: pi-deliver rollback cause
         run: bash scripts/tests/pi-deliver-rollback-cause.sh
+
+      - name: pi-deliver staging wake
+        run: bash scripts/tests/pi-deliver-staging-wake.sh

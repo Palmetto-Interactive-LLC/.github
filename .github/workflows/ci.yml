@@ -18,8 +18,9 @@ jobs:
     with:
       stack: docs
 
-  # Runs the shipped workflows-match-main check from pi-release.yml against a
-  # fake GitHub API (scripts/tests/pi-release-workflows-check.sh).
+  # Runs shipped snippets against fakes: the workflows-match-main check from
+  # pi-release.yml (scripts/tests/pi-release-workflows-check.sh) and the
+  # rollback-cause message from pi-deliver.yml (pi-deliver-rollback-cause.sh).
   pi-release-tests:
     runs-on: codebuild-pi-actions-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 5
@@ -33,3 +34,6 @@ jobs:
 
       - name: pi-release workflows check
         run: bash scripts/tests/pi-release-workflows-check.sh
+
+      - name: pi-deliver rollback cause
+        run: bash scripts/tests/pi-deliver-rollback-cause.sh

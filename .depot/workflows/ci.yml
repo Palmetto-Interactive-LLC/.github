@@ -30,3 +30,11 @@ jobs:
         run: |
           set -euo pipefail
           for f in .depot/workflows/*.yml; do python3 -c 'import sys,yaml;yaml.safe_load(open(sys.argv[1]))' "$f" || { python3 -m pip -q install pyyaml && python3 -c 'import sys,yaml;yaml.safe_load(open(sys.argv[1]))' "$f"; }; done
+
+  # Dogfoods the shared checks (and so lints every workflow in this repo).
+  pi-checks:
+    permissions:
+      contents: read
+    uses: ./.depot/workflows/pi-checks.yml
+    with:
+      stack: docs

@@ -1,34 +1,25 @@
-# Palmetto production release (reusable). The standard caller is a workflow
-# named exactly "Create Release" that runs on workflow_dispatch from main and
-# nothing else (templates: pi-release.yml). Steps, in order:
+# Palmetto production release on Depot CI (reusable). The standard caller is a
+# workflow named exactly "Create Release" in .depot/workflows that runs on
+# workflow_dispatch from main and nothing else. Steps, in order:
 #
 #   1. gates: pi-checks.yml in release mode (full test suite, build, dependency
 #      audit, full-history secret scan, actionlint and zizmor, release-gate-command).
-#   2. pi-deliver.yml in release mode: take the image already built and
-#      deployed to staging for this commit (no rebuild), gate on ECR's CRITICAL
-#      scan of that exact digest, cut the tag vYYYY.MM.DD.N and the GitHub
-#      Release, then deploy the same digest to prod with the migration.
-#   With the dispatch input rollback_to set, gates and the release are skipped
-#   and pi-deliver redeploys that existing image to rollback_env instead.
+#   2. deliver.yml in release mode: require the image already built and deployed
+#      to staging for the head of main (no rebuild), gate on ECR's CRITICAL scan,
+#      cut the tag vYYYY.MM.DD.N and the GitHub Release, then deploy the same
+#      digest to prod with the migration.
+#   dry_run=true (a workflow_dispatch input on the caller) runs the gates only.
+#   Only the head of main is released. To roll back, revert on main and release.
 #
-# The caller's workflow_dispatch declares these optional inputs (the templates do):
-#   sha          full commit SHA on main to release; default is main's head. Its
-#                already-built image is released, so the SHA must be on main and
-#                its image must exist in ECR. A non-head SHA is a deliberate choice.
-#   requested_by free text (the Slack release button puts the requester here).
-#   dry_run      true: only the heavy gates and the ECR scan of the image; no tag,
-#                no deploy, no notification.
-#   rollback_to / rollback_env: the rollback path.
-# Outputs (and the notify job): release_url, release_tag, app_url, image_digest, run_url.
+# Callers pin this file by full SHA and grant contents: write and id-token: write
+# (no "environment:"):
+#   uses: Palmetto-Interactive-LLC/.github/.depot/workflows/pi-release.yml@<sha>
+# Depot CI variables do not resolve inside an external reusable workflow, so the
+# caller passes them as inputs (deploy-enabled, push-role-arn, deploy-role-arn,
+# serving-secrets, posthog-project-id, notify-role-arn, app-url).
 #
 # deploy: false (pi-platform and other repos with no ECS service) runs the gates
 # and cuts the release tag with nothing to deploy.
-#
-# Prod deploys happen only here, and only on a manual run: pi-deliver refuses
-# mode release or rollback unless the event is workflow_dispatch on main.
-# The caller grants contents: write and id-token: write and uses no
-# "environment:". Runner labels: runner-small and runner-build (JSON arrays of
-# labels) are forwarded to every job below; this file is where they are read.
 name: PI Release
 
 on:
@@ -40,14 +31,6 @@ on:
       cluster:
         description: ECS cluster name.
         type: string
-      runner-build:
-        description: runs-on for the image build, as a JSON array of labels. The default '["codebuild-medium"]' is the org CodeBuild runner on general1.medium (x86_64). Must be an x86_64 runner with Docker. Callers should not override it.
-        type: string
-        default: '["codebuild-medium"]'
-      runner-small:
-        description: runs-on for the deploy jobs (same format as runner-build).
-        type: string
-        default: '["codebuild"]'
       images:
         description: JSON list of {name, dockerfile, context[, container]}. name is the ECR repository suffix (<app>/<name>). container defaults to the main container for name "web" and to name otherwise.
         type: string
@@ -75,10 +58,6 @@ on:
         description: 'Path, in the caller repository, of the ECR scan allowlist: CRITICAL findings it names (with a reason and an optional expiry) do not fail the build. A missing file is an empty allowlist. See README.md.'
         type: string
         default: .github/ecr-scan-allowlist.json
-      scan-timeout-minutes:
-        description: How long to wait for the ECR image scan to complete, per image.
-        type: number
-        default: 10
       stack:
         description: 'Toolchain and default commands: node | python | go | rust | tofu | docs'
         type: string
@@ -135,8 +114,32 @@ on:
         description: "true (default): the app has staging services. false: no staging environment; a merge only builds the image and a release skips the staging-digest check."
         type: boolean
         default: true
+      deploy-enabled:
+        description: 'Pass the ECS_DEPLOY_ENABLED Depot CI variable. Delivery runs only when this is "true".'
+        type: string
+        default: ""
+      push-role-arn:
+        description: 'Pass the PI_PLATFORM_IMAGE_PUSH_ROLE_ARN Depot CI variable.'
+        type: string
+        default: ""
+      deploy-role-arn:
+        description: 'Pass the ECS_DEPLOY_ROLE_ARN Depot CI variable.'
+        type: string
+        default: ""
+      serving-secrets:
+        description: 'Pass the ECS_SERVING_SECRETS Depot CI variable.'
+        type: string
+        default: "{}"
+      posthog-project-id:
+        description: 'Pass the POSTHOG_PROJECT_ID Depot CI variable (optional).'
+        type: string
+        default: ""
+      notify-role-arn:
+        description: 'Pass the PI_RELEASE_NOTIFY_ROLE_ARN Depot CI variable (optional). The role must trust the Depot OIDC subject. Empty: no Slack notification.'
+        type: string
+        default: ""
       app-url:
-        description: "The production URL reported as app_url. Empty falls back to the APP_URL repository variable."
+        description: "The production URL reported as app_url (pass the APP_URL Depot CI variable)."
         type: string
         default: ""
       deploy:
@@ -144,6 +147,9 @@ on:
         type: boolean
         default: true
     secrets:
+      incident_io_url:
+        description: 'Optional. The INCIDENT_IO_CI_ALERT_URL Depot CI secret. A failed delivery or release posts a non-paging alert to it.'
+        required: false
       POSTHOG_ANNOTATION_KEY:
         description: >-
           Optional PostHog personal API key scoped to annotation:write. When set
@@ -153,16 +159,16 @@ on:
 
     outputs:
       release_url:
-        description: URL of the GitHub Release (empty for a dry run or rollback).
+        description: URL of the GitHub Release (empty for a dry run).
         value: ${{ jobs.notify.outputs.release_url }}
       release_tag:
-        description: The release tag vYYYY.MM.DD.N (empty for a dry run or rollback).
+        description: The release tag vYYYY.MM.DD.N (empty for a dry run).
         value: ${{ jobs.notify.outputs.release_tag }}
       app_url:
         description: The production URL.
         value: ${{ jobs.notify.outputs.app_url }}
       image_digest:
-        description: Digest of the released (or rolled back) image.
+        description: Digest of the released image.
         value: ${{ jobs.notify.outputs.image_digest }}
       run_url:
         description: URL of this workflow run.
@@ -173,13 +179,11 @@ permissions: {}
 jobs:
   mode:
     name: mode
-    runs-on: ${{ inputs.runner-small == '["codebuild"]' && format('codebuild-pi-actions-{0}-{1}', github.run_id, github.run_attempt) || fromJSON(inputs.runner-small) }}
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
     outputs:
-      mode: ${{ steps.mode.outputs.mode }}
-      sha: ${{ steps.mode.outputs.sha }}
       dry_run: ${{ steps.mode.outputs.dry_run }}
       requested_by: ${{ steps.mode.outputs.requested_by }}
     steps:
@@ -188,11 +192,8 @@ jobs:
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
-          ROLLBACK_TO: ${{ github.event.inputs.rollback_to }}
-          RELEASE_SHA: ${{ github.event.inputs.sha }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
           REQUESTED_BY: ${{ github.event.inputs.requested_by }}
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if test "$EVENT_NAME" != "workflow_dispatch" || test "$GITHUB_REF" != "refs/heads/main"; then
@@ -202,60 +203,15 @@ jobs:
             echo "dry_run=$(test "$DRY_RUN" = "true" && echo true || echo false)"
             printf 'requested_by=%s\n' "$(printf '%s' "$REQUESTED_BY" | tr -d '\r\n' | cut -c1-200)"
           } >> "$GITHUB_OUTPUT"
-          if test -n "$ROLLBACK_TO"; then
-            echo "mode=rollback" >> "$GITHUB_OUTPUT"; echo "sha=" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          echo "mode=release" >> "$GITHUB_OUTPUT"
-          if test -z "$RELEASE_SHA"; then echo "sha=" >> "$GITHUB_OUTPUT"; exit 0; fi
-          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be a full 40-character commit SHA."; exit 1; }
-          code="$(curl -sS -o "$RUNNER_TEMP/compare.json" -w '%{http_code}' -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${GITHUB_REPOSITORY}/compare/${RELEASE_SHA}...main")"
-          case "$code" in
-            200) rel="$(jq -r '.status' "$RUNNER_TEMP/compare.json")" ;;
-            404|422) echo "::error::commit ${RELEASE_SHA} is not on main (GitHub does not know it)."; exit 1 ;;
-            *) echo "::error::Could not check ${RELEASE_SHA} against main (HTTP ${code})."; exit 1 ;;
-          esac
-          case "$rel" in identical|ahead) ;; *) echo "::error::commit ${RELEASE_SHA} is not on main (compare says '${rel}')."; exit 1;; esac
-          # BEGIN workflows-match-main
-          # GITHUB_TOKEN can't tag a commit whose .github/workflows differs from
-          # main's: GitHub answers 403 "Resource not accessible by integration" to
-          # git/refs and to /releases alike, because the token never holds the
-          # workflows permission (verified 2026-10-29). Refuse here, before the
-          # gates, instead of failing at the tag after them.
-          # Tested by scripts/tests/pi-release-workflows-check.sh.
-          wf_tree() {
-            local code
-            code="$(curl -sS -o "$RUNNER_TEMP/github-dir.json" -w '%{http_code}' -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/.github?ref=$1")" || code=000
-            case "$code" in
-              200) jq -r '[.[] | select(.name == "workflows" and .type == "dir") | .sha][0] // "none"' "$RUNNER_TEMP/github-dir.json" ;;
-              404) echo none ;;
-              *) echo "::error::Could not read .github at $1 (HTTP ${code})."; return 1 ;;
-            esac
-          }
-          release_tree="$(wf_tree "$RELEASE_SHA")" || { echo "$release_tree"; exit 1; }
-          main_tree="$(wf_tree main)" || { echo "$main_tree"; exit 1; }
-          if test "$release_tree" != "$main_tree"; then
-            msg="main changed .github/workflows after ${RELEASE_SHA:0:12}, and GitHub won't let this run's token tag a commit whose workflows differ from main's. Release main's head instead (leave sha empty)."
-            if test "$DRY_RUN" = "true"; then
-              echo "::warning::${msg} A real release of this commit would stop here."
-            else
-              echo "::error::${msg}"; exit 1
-            fi
-          fi
-          # END workflows-match-main
-          echo "sha=${RELEASE_SHA}" >> "$GITHUB_OUTPUT"
 
   gates:
     name: Heavy gates
     needs: mode
-    if: needs.mode.outputs.mode == 'release'
     permissions:
       contents: read
-    uses: ./.github/workflows/pi-checks.yml
+    uses: Palmetto-Interactive-LLC/.github/.depot/workflows/pi-checks.yml@f6f5e870534b34718cc6540c4b673c25dde6ca44
     with:
       mode: release
-      ref: ${{ needs.mode.outputs.sha }}
-      runner-small: ${{ inputs.runner-small }}
       stack: ${{ inputs.stack }}
       working-directory: ${{ inputs.working-directory }}
       node-version: ${{ inputs.node-version }}
@@ -270,21 +226,20 @@ jobs:
       quick-test-command: ${{ inputs.quick-test-command }}
       build-command: ${{ inputs.build-command }}
       release-gate-command: ${{ inputs.release-gate-command }}
+
   deliver:
     name: Release to prod
     needs: [mode, gates]
-    if: ${{ !cancelled() && inputs.deploy && needs.mode.result == 'success' && (needs.gates.result == 'success' || needs.gates.result == 'skipped') }}
+    if: ${{ !cancelled() && inputs.deploy && needs.mode.outputs.dry_run != 'true' && needs.gates.result == 'success' }}
     permissions:
       contents: write
       id-token: write
-    uses: ./.github/workflows/pi-deliver.yml
+    uses: Palmetto-Interactive-LLC/.github/.depot/workflows/deliver.yml@f6f5e870534b34718cc6540c4b673c25dde6ca44
     with:
-      mode: ${{ needs.mode.outputs.mode }}
+      mode: release
       has-staging: ${{ inputs.has-staging }}
       app: ${{ inputs.app }}
       cluster: ${{ inputs.cluster }}
-      runner-build: ${{ inputs.runner-build }}
-      runner-small: ${{ inputs.runner-small }}
       images: ${{ inputs.images }}
       services: ${{ inputs.services }}
       container-name: ${{ inputs.container-name }}
@@ -292,15 +247,21 @@ jobs:
       migrate-secrets: ${{ inputs.migrate-secrets }}
       stable-timeout-minutes: ${{ inputs.stable-timeout-minutes }}
       scan-allowlist: ${{ inputs.scan-allowlist }}
-      scan-timeout-minutes: ${{ inputs.scan-timeout-minutes }}
+      deploy-enabled: ${{ inputs.deploy-enabled }}
+      push-role-arn: ${{ inputs.push-role-arn }}
+      deploy-role-arn: ${{ inputs.deploy-role-arn }}
+      serving-secrets: ${{ inputs.serving-secrets }}
+      posthog-project-id: ${{ inputs.posthog-project-id }}
     secrets:
+      incident_io_url: ${{ secrets.incident_io_url }}
       POSTHOG_ANNOTATION_KEY: ${{ secrets.POSTHOG_ANNOTATION_KEY }}
+
   # No ECS service: the gates passed, so cut the tag and the GitHub Release.
   tag:
     name: Cut release
     needs: [mode, gates]
-    if: ${{ !inputs.deploy && needs.mode.outputs.mode == 'release' && needs.mode.outputs.dry_run != 'true' && needs.gates.result == 'success' }}
-    runs-on: ${{ inputs.runner-small == '["codebuild"]' && format('codebuild-pi-actions-{0}-{1}', github.run_id, github.run_attempt) || fromJSON(inputs.runner-small) }}
+    if: ${{ !inputs.deploy && needs.mode.outputs.dry_run != 'true' && needs.gates.result == 'success' }}
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: write
@@ -312,8 +273,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_SHA: ${{ needs.mode.outputs.sha || github.sha }}
-          EXPLICIT_SHA: ${{ needs.mode.outputs.sha }}
+          SOURCE_SHA: ${{ github.sha }}
           SOURCE_REPOSITORY: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -334,9 +294,7 @@ jobs:
           # Head check: a release is always of the head of main.
           req GET "${api}/git/ref/heads/main"
           head="$(jq -r '.object.sha // empty' <<<"$body")"
-          if test -z "$EXPLICIT_SHA"; then
-            test "$head" = "$SOURCE_SHA" || { echo "::error::${SOURCE_SHA} is not the head of main (${head})."; exit 1; }
-          fi
+          test "$head" = "$SOURCE_SHA" || { echo "::error::${SOURCE_SHA} is not the head of main (${head})."; exit 1; }
           # Version: reuse the tag this commit already has, else the next vYYYY.MM.DD.N.
           req GET "${api}/tags?per_page=100"
           existing="$(jq -r --arg sha "$SOURCE_SHA" '[.[] | select(.commit.sha == $sha and (.name | test("^v[0-9]{4}[.][0-9]{2}[.][0-9]{2}[.][0-9]+$")))][0].name // empty' <<<"$body")"
@@ -386,7 +344,7 @@ jobs:
     name: Notify
     needs: [mode, gates, deliver, tag]
     if: ${{ always() && needs.mode.outputs.dry_run != 'true' }}
-    runs-on: ${{ inputs.runner-small == '["codebuild"]' && format('codebuild-pi-actions-{0}-{1}', github.run_id, github.run_attempt) || fromJSON(inputs.runner-small) }}
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 10
     permissions:
       id-token: write
@@ -397,7 +355,7 @@ jobs:
       image_digest: ${{ steps.result.outputs.image_digest }}
       run_url: ${{ steps.result.outputs.run_url }}
     env:
-      NOTIFY_ROLE_ARN: ${{ vars.PI_RELEASE_NOTIFY_ROLE_ARN }}
+      NOTIFY_ROLE_ARN: ${{ inputs.notify-role-arn }}
     steps:
       - name: Work out the result
         id: result
@@ -405,8 +363,7 @@ jobs:
         env:
           NEEDS: ${{ toJSON(needs) }}
           APP_URL_INPUT: ${{ inputs.app-url }}
-          APP_URL_VAR: ${{ vars.APP_URL }}
-          RELEASE_SHA: ${{ needs.mode.outputs.sha }}
+          RELEASE_SHA: ${{ github.sha }}
           REQUESTED_BY: ${{ needs.mode.outputs.requested_by }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
@@ -423,7 +380,7 @@ jobs:
           fi
           release_url=""
           if test -n "$tag"; then release_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${tag}"; fi
-          app_url="${APP_URL_INPUT:-$APP_URL_VAR}"
+          app_url="$APP_URL_INPUT"
           digest="$(jq -r '.deliver.outputs.image_digest // ""' <<<"$NEEDS")"
           sha="$(jq -r '.deliver.outputs.sha // ""' <<<"$NEEDS")"
           [ -n "$sha" ] || sha="${RELEASE_SHA:-$GITHUB_SHA}"
@@ -444,7 +401,7 @@ jobs:
       - name: No release notifier configured
         if: ${{ env.NOTIFY_ROLE_ARN == '' }}
         shell: bash
-        run: echo "::warning::PI_RELEASE_NOTIFY_ROLE_ARN is not set for this repository; no Slack notification."
+        run: echo "::warning::the notify-role-arn input is empty; no Slack notification."
 
       - name: Configure AWS credentials through GitHub OIDC (release notify)
         if: ${{ env.NOTIFY_ROLE_ARN != '' }}
@@ -453,7 +410,7 @@ jobs:
         with:
           aws-region: us-east-1
           role-session-name: pi-release-notify-${{ github.run_id }}
-          role-to-assume: ${{ vars.PI_RELEASE_NOTIFY_ROLE_ARN }}
+          role-to-assume: ${{ inputs.notify-role-arn }}
 
       - name: Tell the release bot
         if: ${{ env.NOTIFY_ROLE_ARN != '' }}
@@ -480,3 +437,33 @@ jobs:
             '{action:"release_result", repository:$repository, run_id:$run_id, run_attempt:$run_attempt, conclusion:$conclusion, mode:$mode, sha:$sha, requested_by:$requested_by, release_tag:$release_tag, release_url:$release_url, app_url:$app_url, image_digest:$image_digest, run_url:$run_url}')"
           aws lambda invoke --function-name pi-release-notify --cli-binary-format raw-in-base64-out --payload "$payload" "$RUNNER_TEMP/notify.json" >/dev/null
           echo "Release bot notified (${CONCLUSION})."
+
+  # Non-paging alert to incident.io when the gates or the tag job failed. A
+  # failed delivery is alerted by deliver.yml itself.
+  alert:
+    name: Alert on failure
+    needs: [gates, tag]
+    if: failure()
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Post to incident.io
+        shell: bash
+        env:
+          ALERT_URL: ${{ secrets.incident_io_url }}
+          REPO: ${{ github.repository }}
+          APP: ${{ inputs.app }}
+        run: |
+          set -euo pipefail
+          if test -z "$ALERT_URL"; then
+            echo "::notice::No incident_io_url secret passed. Not alerting."; exit 0
+          fi
+          echo "::add-mask::$ALERT_URL"
+          payload="$(jq -nc --arg repo "$REPO" --arg app "${APP:-$REPO}" --arg sha "$GITHUB_SHA" --arg job "${DEPOT_JOB_URL:-}" \
+            '{title: "Release gates failed: \($app)",
+              description: "\($repo) @ \($sha[0:12]) failed the release gates or tag. Run: \($job)",
+              deduplication_key: "release-\($repo)-\($sha)",
+              status: "firing"}')"
+          code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 -X POST -H 'Content-Type: application/json' -d "$payload" "$ALERT_URL" 2>/dev/null || true)"
+          case "$code" in 2??) echo "Alert sent." ;; *) echo "::warning::incident.io alert returned HTTP ${code:-none}." ;; esac

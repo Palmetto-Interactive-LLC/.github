@@ -65,7 +65,7 @@ SCRIPT_DIR=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(unset CDPATH; cd -- "$SCRIPT_DIR/.." && pwd)
 RULESET_DIR=$REPO_ROOT/.github/rulesets
 
-DEFAULT_ALLOWED_ACTION_PATTERNS='anthropics/claude-code-action@*,aws-actions/amazon-ecr-login@*,aws-actions/configure-aws-credentials@*,docker/build-push-action@*,docker/setup-buildx-action@*,openai/codex-action@*,ossf/scorecard-action@*,step-security/harden-runner@*,trufflesecurity/trufflehog@*,aquasecurity/trivy-action@*,bridgecrewio/checkov-action@*,zgosalvez/github-actions-ensure-sha-pinned-actions@*,opentofu/setup-opentofu@*,dtolnay/rust-toolchain@*,Swatinem/rust-cache@*,bencherdev/bencher@*,google-github-actions/auth@*,google-github-actions/setup-gcloud@*,pnpm/action-setup@*,astral-sh/setup-uv@*,softprops/action-gh-release@*,actions/setup-python@*,actions/cache@*,actions/download-artifact@*'
+DEFAULT_ALLOWED_ACTION_PATTERNS='anthropics/claude-code-action@*,aws-actions/amazon-ecr-login@*,aws-actions/configure-aws-credentials@*,depot/setup-action@*,docker/build-push-action@*,docker/setup-buildx-action@*,openai/codex-action@*,ossf/scorecard-action@*,step-security/harden-runner@*,trufflesecurity/trufflehog@*,aquasecurity/trivy-action@*,bridgecrewio/checkov-action@*,zgosalvez/github-actions-ensure-sha-pinned-actions@*,opentofu/setup-opentofu@*,dtolnay/rust-toolchain@*,Swatinem/rust-cache@*,bencherdev/bencher@*,google-github-actions/auth@*,google-github-actions/setup-gcloud@*,pnpm/action-setup@*,astral-sh/setup-uv@*,softprops/action-gh-release@*,actions/setup-python@*,actions/cache@*,actions/download-artifact@*'
 ALLOWED_ACTION_PATTERNS=${ALLOWED_ACTION_PATTERNS:-$DEFAULT_ALLOWED_ACTION_PATTERNS}
 
 need gh

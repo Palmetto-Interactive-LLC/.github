@@ -88,7 +88,7 @@ on:
         type: string
         default: .github/ecr-scan-allowlist.json
     secrets:
-      incident-io-url:
+      incident_io_url:
         description: 'Optional. The INCIDENT_IO_CI_ALERT_URL Depot CI secret (incident.io "CI" HTTP alert source URL incl. token). A failed delivery posts a non-paging alert to it.'
         required: false
     outputs:
@@ -704,14 +704,14 @@ jobs:
       - name: Post to incident.io
         shell: bash
         env:
-          ALERT_URL: ${{ secrets.incident-io-url }}
+          ALERT_URL: ${{ secrets.incident_io_url }}
           REPO: ${{ github.repository }}
           MODE: ${{ inputs.mode }}
           APP: ${{ inputs.app }}
         run: |
           set -euo pipefail
           if test -z "$ALERT_URL"; then
-            echo "::notice::No incident-io-url secret passed. Not alerting."; exit 0
+            echo "::notice::No incident_io_url secret passed. Not alerting."; exit 0
           fi
           echo "::add-mask::$ALERT_URL"
           payload="$(jq -nc --arg app "$APP" --arg mode "$MODE" --arg repo "$REPO" --arg sha "$GITHUB_SHA" --arg job "${DEPOT_JOB_URL:-}" \

@@ -41,7 +41,7 @@ on:
         description: ECS cluster name.
         type: string
       runner-build:
-        description: runs-on for the image build, as a JSON array of labels. The default '["codebuild-medium"]' is the org CodeBuild runner on arm1.medium. Must be an arm64 runner with Docker. Callers should not override it.
+        description: runs-on for the image build, as a JSON array of labels. The default '["codebuild-medium"]' is the org CodeBuild runner on general1.medium (x86_64). Must be an x86_64 runner with Docker. Callers should not override it.
         type: string
         default: '["codebuild-medium"]'
       runner-small:

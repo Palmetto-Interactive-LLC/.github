@@ -1,7 +1,7 @@
 # Palmetto standard delivery (reusable). Three modes:
 #
-#   staging (default, push to main): build the arm64 image natively (docker
-#     buildx on the arm64 runner, no QEMU), push it to ECR by full git SHA,
+#   staging (default, push to main): build the amd64 image natively (docker
+#     buildx on the x86_64 runner, no QEMU), push it to ECR by full git SHA,
 #     deploy STAGING on ECS, wait for it to be stable. Never touches prod and
 #     cuts no release.
 #   release (workflow_dispatch from main only, via pi-release.yml): no build.
@@ -18,9 +18,10 @@
 #
 # Reusable workflows run on the CALLER's runners, so every job takes its
 # runs-on from an input (a JSON array of labels, read with fromJSON). The
-# defaults are the org CodeBuild runner: '["codebuild-medium"]' (arm1.medium)
-# for the image build and '["codebuild"]' (arm1.small) for the deploy jobs,
-# expanded to codebuild-pi-actions-<run_id>-<run_attempt>[-arm-3.0-medium].
+# defaults are the org CodeBuild runner: '["codebuild-medium"]' (general1.medium,
+# x86_64, a per-job label override on the ARM-default pi-actions project) for the
+# image build and '["codebuild"]' (arm1.small) for the deploy jobs, expanded to
+# codebuild-pi-actions-<run_id>-<run_attempt>[-linux-5.0-medium].
 # Callers pass nothing; this file is the one place the label lives. The caller grants
 #   permissions: { contents: write, id-token: write }
 # on the job that calls this workflow (the release job needs contents: write,
@@ -52,8 +53,9 @@ on:
       runner-build:
         description: >-
           runs-on for the image build, as a JSON array of labels. The default
-          '["codebuild-medium"]' is the org CodeBuild runner on arm1.medium.
-          Must be an arm64 runner with Docker. Callers should not override it.
+          '["codebuild-medium"]' is the org CodeBuild runner on general1.medium
+          (x86_64). Must be an x86_64 runner with Docker: ECS hosts are x86_64
+          since 2026-11. Callers should not override it.
         type: string
         default: '["codebuild-medium"]'
       runner-small:
@@ -144,7 +146,7 @@ jobs:
   build:
     name: Build image
     if: vars.ECS_DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/main'
-    runs-on: ${{ inputs.runner-build == '["codebuild-medium"]' && format('codebuild-pi-actions-{0}-{1}-arm-3.0-medium', github.run_id, github.run_attempt) || fromJSON(inputs.runner-build) }}
+    runs-on: ${{ inputs.runner-build == '["codebuild-medium"]' && format('codebuild-pi-actions-{0}-{1}-linux-5.0-medium', github.run_id, github.run_attempt) || fromJSON(inputs.runner-build) }}
     timeout-minutes: 60
     permissions:
       contents: read
@@ -250,17 +252,17 @@ jobs:
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::The image tag must be the full 40-character commit SHA."; exit 1; }
           test -n "$AWS_ROLE_ARN" || { echo "::error::Set the PI_PLATFORM_IMAGE_PUSH_ROLE_ARN repository variable."; exit 1; }
           docker version --format '{{.Server.Version}}' >/dev/null \
-            || { echo "::error::No Docker daemon on this runner. runner-build must be an arm64 runner with Docker."; exit 1; }
+            || { echo "::error::No Docker daemon on this runner. runner-build must be an x86_64 runner with Docker."; exit 1; }
           case "$(uname -m)" in
-            aarch64|arm64) ;;
-            *) echo "::error::runner-build is $(uname -m). ECS hosts are Graviton, so images build natively on an arm64 runner."; exit 1 ;;
+            x86_64|amd64) ;;
+            *) echo "::error::runner-build is $(uname -m). ECS hosts are x86_64, so images build natively on an x86_64 runner."; exit 1 ;;
           esac
           jq -e 'type == "array" and length > 0 and all(.[]; has("name") and has("dockerfile") and has("context"))' <<<"$IMAGES_INPUT" >/dev/null \
             || { echo "::error::images must be a JSON list of {name, dockerfile, context}."; exit 1; }
 
-      # ECS hosts are Graviton and the runner is arm64, so the build is native:
+      # ECS hosts are x86_64 and the runner is x86_64, so the build is native:
       # no QEMU. The architecture check in "Validate release identity" fails the
-      # job if a caller points runner-build at an x86_64 runner.
+      # job if a caller points runner-build at another architecture.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
 
@@ -287,7 +289,7 @@ jobs:
           registry-type: public
           mask-password: true
 
-      - name: Build and push arm64 images (skipped when the SHA tag exists)
+      - name: Build and push amd64 images (skipped when the SHA tag exists)
         id: build
         shell: bash
         env:
@@ -311,12 +313,12 @@ jobs:
               if test "$MODE" != "staging"; then
                 echo "::error::no image for ${SOURCE_SHA}: ${repo}:${SOURCE_SHA} is not in ECR. A ${MODE} never builds. For a release, let the staging deploy of this commit finish first; for a rollback the image may have expired."; exit 1
               fi
-              echo "::group::Build ${repo} (linux/arm64)"
+              echo "::group::Build ${repo} (linux/amd64)"
               labels=(--label "org.opencontainers.image.revision=${SOURCE_SHA}"
                       --label "org.opencontainers.image.source=https://github.com/${SOURCE_REPOSITORY}")
               # One plain image manifest: no attestation index, so the digest we
               # promote to prod is the image itself.
-              docker buildx build --platform linux/arm64 --provenance=false --sbom=false \
+              docker buildx build --platform linux/amd64 --provenance=false --sbom=false \
                 "${labels[@]}" --file "$dockerfile" --tag "$uri" --push "$context"
               echo "::endgroup::"
             else
@@ -326,17 +328,27 @@ jobs:
             fi
             rm -f "$err"
 
-            # Prove the image in ECR is arm64, whether we just built it or reused it.
+            # Read the architecture of the image in ECR, whether we just built it
+            # or reused it. New builds are amd64. A release or rollback of a
+            # commit built before the 2026-11 x86 move reuses its arm64 image;
+            # the deploy job writes the task definition's runtimePlatform from
+            # this value, so the revision always matches its image.
             arch="$(docker buildx imagetools inspect "$uri" --format '{{json .Image}}' | jq -r '.architecture // empty')"
-            test "$arch" = "arm64" || { echo "::error::${repo}:${SOURCE_SHA} is '${arch:-unknown}', not arm64."; exit 1; }
+            case "$arch" in
+              amd64|arm64) echo "${repo}:${SOURCE_SHA} is linux/${arch}" ;;
+              *) echo "::error::${repo}:${SOURCE_SHA} has architecture '${arch:-unknown}', not amd64 or arm64."; exit 1 ;;
+            esac
 
             digest="$(aws ecr describe-images --repository-name "$repo" --image-ids "imageTag=${SOURCE_SHA}" \
               --region "$AWS_REGION" --query 'imageDetails[0].imageDigest' --output text)"
             [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::ECR returned no valid digest for ${repo}."; exit 1; }
             result="$(jq -c --arg name "$name" --arg repo "$repo" --arg container "$container" \
-              --arg ref "${REGISTRY}/${repo}@${digest}" --arg digest "$digest" \
-              '. + [{name:$name, repo:$repo, container:$container, ref:$ref, digest:$digest}]' <<<"$result")"
+              --arg ref "${REGISTRY}/${repo}@${digest}" --arg digest "$digest" --arg arch "$arch" \
+              '. + [{name:$name, repo:$repo, container:$container, ref:$ref, digest:$digest, arch:$arch}]' <<<"$result")"
           done < <(jq -c '.[]' <<<"$IMAGES_INPUT")
+          # One task definition holds every image of a build, so they must share an architecture.
+          test "$(jq -r '[.[].arch] | unique | length' <<<"$result")" = 1 \
+            || { echo "::error::The images of one build have different architectures: $(jq -c '[.[] | {repo, arch}]' <<<"$result")"; exit 1; }
           echo "images=${result}" >> "$GITHUB_OUTPUT"
 
       # The gate runs before anything is deployed: a CRITICAL finding that the
@@ -593,7 +605,7 @@ jobs:
 
           req GET "${api}/releases/tags/${VERSION}"
           if test "$code" = "404"; then
-            rel_body="$(jq -r '"Images (linux/arm64), deployed by digest:\n" + ([.[] | "- `\(.repo)@\(.digest)`"] | join("\n"))' <<<"$IMAGES")"
+            rel_body="$(jq -r '"Images (linux/\(.[0].arch // "amd64")), deployed by digest:\n" + ([.[] | "- `\(.repo)@\(.digest)`"] | join("\n"))' <<<"$IMAGES")"
             rel_body="${rel_body}"$'\n\n'"Commit: ${SOURCE_SHA}"$'\n'"Workflow run: ${RUN_URL}"
             req POST "${api}/releases" "$(jq -nc --arg tag "$VERSION" --arg body "$rel_body" \
               '{tag_name:$tag, name:$tag, body:$body, generate_release_notes:true, make_latest:"true"}')"
@@ -761,6 +773,18 @@ jobs:
                                             + [{name: "SENTRY_RELEASE", value: $rel}])
                         end)' > "$workdir/${family}.json"
             swapped="$(jq --argjson imgs "$IMAGES" '[.containerDefinitions[] | select(.image as $i | $imgs | any(.ref == $i))] | length' "$workdir/${family}.json")"
+            # BEGIN runtime-platform
+            # The revision's CPU architecture follows its image, not the copied
+            # live revision: ECS places an X86_64 revision only on x86_64 hosts
+            # and an ARM64 one only on arm64 hosts. Tested by
+            # scripts/tests/pi-deliver-runtime-platform.sh.
+            cpu_arch="$(jq -r '{amd64: "X86_64", arm64: "ARM64"}[.[0].arch // ""] // empty' <<<"$IMAGES")"
+            test -n "$cpu_arch" || { echo "::error::No known architecture on the images of this build ($(jq -c '[.[].arch]' <<<"$IMAGES"))."; exit 1; }
+            jq --arg a "$cpu_arch" '.runtimePlatform = {cpuArchitecture: $a, operatingSystemFamily: "LINUX"}' \
+              "$workdir/${family}.json" > "$workdir/${family}.rp.json"
+            mv "$workdir/${family}.rp.json" "$workdir/${family}.json"
+            echo "Runtime platform for ${family}: ${cpu_arch}"
+            # END runtime-platform
             test "$swapped" -gt 0 || { echo "::error::No container in ${family} matched an image in this build (containers: $(jq -r '[.containerDefinitions[].name] | join(", ")' "$workdir/${family}.json"))."; exit 1; }
             # BEGIN secret-guard
             # A serving revision may hold only the secrets pi-platform declares
@@ -961,6 +985,6 @@ jobs:
             echo "### Deploy ${DEPLOY_ENV}"
             echo
             echo "- Release: \`${VERSION}\` (\`${SOURCE_SHA}\`)"
-            jq -r '.[] | "- Image: `\(.repo)@\(.digest)`"' <<<"$IMAGES"
+            jq -r '.[] | "- Image: `\(.repo)@\(.digest)` (linux/\(.arch // "unknown"))"' <<<"$IMAGES"
             if test -n "$DEPLOY"; then jq -r '.[] | "- Task definition: `\(.arn | split("/")[-1])`"' <<<"$DEPLOY"; fi
           } >> "$GITHUB_STEP_SUMMARY"

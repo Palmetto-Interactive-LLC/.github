@@ -87,10 +87,21 @@ on:
         description: 'Path in the caller repo of the ECR scan allowlist {"allow":[{"id","reason","expires"?}]}. A missing file allows nothing.'
         type: string
         default: .github/ecr-scan-allowlist.json
+      posthog-project-id:
+        description: 'Pass the POSTHOG_PROJECT_ID Depot CI variable (optional). With the POSTHOG_ANNOTATION_KEY secret, a prod deploy posts a PostHog annotation.'
+        type: string
+        default: ""
     secrets:
       incident-io-url:
         description: 'Optional. The INCIDENT_IO_CI_ALERT_URL Depot CI secret (incident.io "CI" HTTP alert source URL incl. token). A failed delivery posts a non-paging alert to it.'
         required: false
+      POSTHOG_ANNOTATION_KEY:
+        description: >-
+          Optional PostHog personal API key scoped to annotation:write. When set
+          (and the project id is set), a successful prod deploy posts a PostHog
+          annotation. Unset: the step is skipped. Callers pass it explicitly.
+        required: false
+
     outputs:
       version:
         description: The release tag (release) or sha-<12>.
@@ -337,7 +348,7 @@ jobs:
             version="sha-${SOURCE_SHA:0:12}"
           else
             # A re-run of the same commit keeps the tag it already has.
-            version="$(gh api "repos/${SOURCE_REPOSITORY}/tags?per_page=100" | jq -r --arg sha "$SOURCE_SHA" \
+            version="$(gh api "repos/${SOURCE_REPOSITORY}/tags?per_page=100" | jq -r --arg sha "$GITHUB_SHA" \
               '[.[] | select(.commit.sha == $sha and (.name | test("^v[0-9]{4}[.][0-9]{2}[.][0-9]{2}[.][0-9]+$")))][0].name // empty')"
             if test -z "$version"; then
               prefix="v$(date -u +%Y.%m.%d)."
@@ -676,6 +687,30 @@ jobs:
               sleep 5
             done
           done < <(jq -c '.[]' <<<"$DEPLOY")
+
+      # Optional: mark the prod deploy on PostHog charts. Skipped unless both the
+      # project id and the annotation key are set. Never fails the deploy.
+      - name: Annotate the deploy in PostHog
+        if: ${{ success() && env.DEPLOY_ENV == 'prod' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          POSTHOG_PROJECT_ID: ${{ inputs.posthog-project-id }}
+          POSTHOG_ANNOTATION_KEY: ${{ secrets.POSTHOG_ANNOTATION_KEY }}
+          POSTHOG_HOST: https://us.posthog.com
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if test -z "${POSTHOG_PROJECT_ID:-}" || test -z "${POSTHOG_ANNOTATION_KEY:-}"; then
+            echo "PostHog annotation skipped (POSTHOG_PROJECT_ID or POSTHOG_ANNOTATION_KEY not set)."; exit 0
+          fi
+          body="$(jq -nc --arg app "$APP" --arg version "$VERSION" --arg sha "$GITHUB_SHA" --arg mode "$MODE" --arg run "$RUN_URL" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{content: ((if $mode == "rollback" then "Rollback " else "Deploy " end) + $app + " " + $version + " to prod (" + $sha[0:12] + ") " + $run), date_marker: $at, scope: "project"}')"
+          code="$(curl -sS -o "$RUNNER_TEMP/posthog-annotation.json" -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer ${POSTHOG_ANNOTATION_KEY}" -H 'Content-Type: application/json' \
+            --data "$body" "${POSTHOG_HOST}/api/projects/${POSTHOG_PROJECT_ID}/annotations/")" || code=000
+          if test "$code" = "201"; then echo "PostHog annotation created (project ${POSTHOG_PROJECT_ID})."
+          else echo "::warning::PostHog annotation failed (HTTP ${code}): $(head -c 200 "$RUNNER_TEMP/posthog-annotation.json" 2>/dev/null || true)"; fi
 
       - name: Job summary
         if: always()

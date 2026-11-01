@@ -148,6 +148,13 @@ Run it from Actions, Create Release, Run workflow on `main`, or `gh workflow run
 
 Concurrency is one delivery per repository (`pi-deliver-<repo>`), never cancelled while running. A newer pending run replaces an older pending one.
 
+### PostHog deploy annotation (optional)
+
+A successful prod deploy (release or a prod rollback) posts an annotation to PostHog (`POST /api/projects/<id>/annotations/`) so releases show on every chart. It is skipped silently unless both are set, and it never fails a deploy (`continue-on-error`).
+
+- Project id: repository variable `POSTHOG_PROJECT_ID` (Depot CI: pass it as the `posthog-project-id` input).
+- Key: secret `POSTHOG_ANNOTATION_KEY`, a PostHog personal API key scoped to `annotation:write` only (create it in the PostHog UI). Callers pass it explicitly on the `pi-release.yml` call (`secrets: { POSTHOG_ANNOTATION_KEY: ... }`) or with `secrets: inherit`.
+
 ### Image scan gate
 
 The release job of `pi-deliver` (mode `release`) reads `describe-image-scan-findings` for each digest staging is running. It polls every 10 seconds until the scan is `COMPLETE` (or `ACTIVE` under enhanced scanning), up to `scan-timeout-minutes`. Then:

@@ -143,6 +143,14 @@ on:
         description: "true (default): deploy prod through pi-deliver. false: gates plus a release tag only, for repositories with no ECS service (pi-platform)."
         type: boolean
         default: true
+    secrets:
+      POSTHOG_ANNOTATION_KEY:
+        description: >-
+          Optional PostHog personal API key scoped to annotation:write. When set
+          (and the project id is set), a successful prod deploy posts a PostHog
+          annotation. Unset: the step is skipped. Callers pass it explicitly.
+        required: false
+
     outputs:
       release_url:
         description: URL of the GitHub Release (empty for a dry run or rollback).
@@ -285,6 +293,8 @@ jobs:
       stable-timeout-minutes: ${{ inputs.stable-timeout-minutes }}
       scan-allowlist: ${{ inputs.scan-allowlist }}
       scan-timeout-minutes: ${{ inputs.scan-timeout-minutes }}
+    secrets:
+      POSTHOG_ANNOTATION_KEY: ${{ secrets.POSTHOG_ANNOTATION_KEY }}
   # No ECS service: the gates passed, so cut the tag and the GitHub Release.
   tag:
     name: Cut release

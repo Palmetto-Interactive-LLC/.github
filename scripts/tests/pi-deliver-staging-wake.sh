@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Runs the "staging-wake" lines exactly as pi-deliver.yml ships them (between
+# Runs the "staging-wake" lines exactly as .depot/workflows/deliver.yml ships them (between
 # its BEGIN/END markers) against a fake DescribeServices, and checks that a
 # staging deploy wakes a service at 0 tasks to 1 and leaves everything else as
 # it is (a staging service already up, and prod at any count).
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-workflow="$repo_root/.github/workflows/pi-deliver.yml"
+workflow="$repo_root/.depot/workflows/deliver.yml"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 

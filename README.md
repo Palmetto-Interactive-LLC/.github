@@ -57,6 +57,22 @@ uses: Palmetto-Interactive-LLC/.github/.github/workflows/pi-checks.yml@<40-char 
 
 `v1` moves only by a new tag on this repository; bump the SHA in callers on purpose.
 
+## Depot CI (the replacement for pi-deliver)
+
+Decided 2026-11-01: every repo moves to Depot CI (org `q0tm5dmw3t`, project `3bhs1495zg`). Workflows live in `.depot/workflows/` and are plain GitHub Actions YAML that Depot runs on its own x86_64 sandboxes (`runs-on: depot-ubuntu-24.04`). The `pi-checks`, `pi-deliver` and `pi-release` sections below describe the GitHub Actions versions that repos still on them use, and go away as each repo cuts over.
+
+`.depot/workflows/deliver.yml` is the one shared delivery workflow. Each ECS app has a thin `deliver.yml` (push to main, staging) and `release.yml` (workflow_dispatch, prod) that call it, pinned by full SHA:
+
+```yaml
+uses: Palmetto-Interactive-LLC/.github/.depot/workflows/deliver.yml@<40-char sha>
+```
+
+- `mode: staging`: `depot build --platform linux/amd64`, push to ECR by SHA, read the architecture back from the image, deploy staging from the service's live task definition revision (secret guard, runtimePlatform from the image, staging wake), wait for the PRIMARY deployment to reach COMPLETED. A circuit-breaker or alarm rollback fails the run and says which.
+- `mode: release`: no build. Requires the image for the head of main and staging running that exact digest, gates on the ECR CRITICAL scan, cuts `vYYYY.MM.DD.N`, deploys the same digest to prod with the migration. Only the head of main is delivered; to roll back, revert on main and release again.
+- AWS auth is Depot's OIDC token (`identity.depot.dev`) through `aws-actions/configure-aws-credentials`. The IAM roles trust the Depot sub for the repo on `main`, set up in pi-platform (`github.depot_ci`).
+- Repo variables are Depot CI variables (`depot ci vars add NAME --value V --repo owner/repo`): `ECS_DEPLOY_ENABLED`, `PI_PLATFORM_IMAGE_PUSH_ROLE_ARN`, `ECS_DEPLOY_ROLE_ARN`, `ECS_SERVING_SECRETS`. GitHub Actions variables are not visible to Depot.
+- The snippets under `scripts/tests/` run the marked blocks of this file against fakes.
+
 ## pi-checks
 
 Inputs: `mode` (`pr` default, or `release`), `runner-small`, `stack` (`node` default, `python`, `go`, `rust`, `tofu`, `docs`), `working-directory`, `node-version`, `python-version`, `go-version` (empty reads `go.mod`), `rust-toolchain`, `tofu-version`, and the phase commands `install-command`, `lint-command`, `typecheck-command`, `quick-test-command` (pull requests), `test-command` (the full suite, release only), `build-command` (release only), `release-gate-command` (extra heavy gate, release only). A command input replaces the stack default for that phase; `-` skips the phase.

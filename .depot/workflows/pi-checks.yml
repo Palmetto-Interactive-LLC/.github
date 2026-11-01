@@ -1,0 +1,616 @@
+# Depot CI Migration
+# Source: .github/workflows/pi-checks.yml
+#
+# Changes made:
+# - Rewrote .github/ path references to .depot/
+
+# Palmetto standard pull-request checks (reusable). One required status check
+# everywhere: the final "pi-checks" job. See README.md ("CI/CD standard").
+#
+# Reusable workflows run on the CALLER's runners, so every job takes its
+# runs-on from the runner-small input: a JSON array of labels read with
+# fromJSON. The default '["codebuild"]' is expanded to the org CodeBuild runner
+# label, codebuild-pi-actions-<run_id>-<run_attempt> (arm1.small, Amazon Linux
+# 2023, arm64), which CodeBuild needs per run. Callers pass nothing; this is the
+# one place the label lives. The tool installers below pick the right binary
+# for arm64 or x86_64.
+#
+# Every caller-supplied value reaches a shell through env:, never inline in run:.
+name: PI Checks
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: >-
+          Release mode only: the commit to check out and test (an explicit
+          release sha). Empty means the commit the run started on.
+        type: string
+        default: ""
+      mode:
+        description: >-
+          pr (default): LIGHT checks for a pull request. Install, lint,
+          typecheck, quick-test-command, a secret scan of the PR's commits, and
+          actionlint when workflows changed. Docs-only changes exit fast.
+          release: the HEAVY gates for a production release (full test suite,
+          build, dependency audit, full-history secret scan, actionlint and
+          zizmor, release-gate-command). Called by pi-release.yml.
+        type: string
+        default: pr
+      runner-small:
+        description: >-
+          runs-on for every job, as a JSON array of labels. The default
+          '["codebuild"]' means the org CodeBuild runner on arm1.small.
+          Callers should not override it.
+        type: string
+        default: '["codebuild"]'
+      stack:
+        description: "Toolchain and default commands: node | python | go | rust | tofu | docs"
+        type: string
+        default: node
+      working-directory:
+        description: Directory the install/lint/typecheck/test/build commands run in.
+        type: string
+        default: .
+      node-version:
+        type: string
+        default: "22"
+      python-version:
+        type: string
+        default: "3.12"
+      go-version:
+        description: Empty means read the version from go.mod.
+        type: string
+        default: ""
+      rust-toolchain:
+        type: string
+        default: stable
+      tofu-version:
+        type: string
+        default: "1.11.5"
+      install-command:
+        description: Overrides the stack default. "-" skips the phase.
+        type: string
+        default: ""
+      lint-command:
+        description: Overrides the stack default. "-" skips the phase.
+        type: string
+        default: ""
+      typecheck-command:
+        description: Overrides the stack default. "-" skips the phase.
+        type: string
+        default: ""
+      test-command:
+        description: >-
+          The FULL test suite. Release mode only. Overrides the stack default.
+          "-" skips the phase.
+        type: string
+        default: ""
+      quick-test-command:
+        description: >-
+          Fast unit tests for pull requests (target: seconds). Empty means the
+          node scripts test:quick or test:unit when one exists, and nothing for
+          other stacks. "-" skips the phase.
+        type: string
+        default: ""
+      build-command:
+        description: Release mode only. Overrides the stack default. "-" skips the phase.
+        type: string
+        default: ""
+      release-gate-command:
+        description: >-
+          Extra heavy gate for a release (IaC and policy checks, cost gates,
+          integration suites). Runs after the standard release phases, in the
+          working directory. Empty or "-" skips it.
+        type: string
+        default: ""
+
+permissions: {}
+
+# A newer push to the same pull request supersedes the older run, so it is
+# cancelled (rebases and quick fix-ups otherwise burn minutes on dead runs).
+# Pushes to main and every other event get a group of their own and are never
+# cancelled. The "-run-" name keeps this group distinct from any group a caller
+# declares itself: two workflows sharing one group string cancel each other.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('pi-checks-run-{0}-pr{1}', github.repository, github.event.pull_request.number) || format('pi-checks-run-{0}-{1}', github.repository, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  ACTIONLINT_VERSION: 1.7.12
+  GITLEAKS_VERSION: 8.30.1
+  OSV_SCANNER_VERSION: 2.4.0
+  ZIZMOR_VERSION: 1.26.1
+
+jobs:
+  # Decides what a pull request needs. Docs-only changes (Markdown, docs/,
+  # licenses, images) skip every other job. Release mode never skips.
+  changes:
+    name: changes
+    runs-on: ${{ inputs.runner-small == '["codebuild"]' && format('codebuild-pi-actions-{0}-{1}', github.run_id, github.run_attempt) || fromJSON(inputs.runner-small) }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      docs_only: ${{ steps.diff.outputs.docs_only }}
+      workflows: ${{ steps.diff.outputs.workflows }}
+    steps:
+      # Depth 2 holds the PR's merge commit and both its parents, so the base
+      # branch tip (HEAD^1) is there without a second, credentialed fetch.
+      - name: Checkout
+        if: inputs.mode == 'pr' && github.event.pull_request.number
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Classify the changed files
+        id: diff
+        shell: bash
+        env:
+          MODE: ${{ inputs.mode }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if test "$MODE" != "pr" || test -z "$PR_NUMBER"; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"; echo "workflows=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          files="$(git diff --name-only HEAD^1 HEAD)"
+          if test -z "$files"; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"; echo "workflows=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if grep -qvE '(^docs/|^LICENSE|^CODEOWNERS$|^[^/]*[.](md|mdx|txt|rst|png|jpe?g|gif|svg|webp)$|[.](md|mdx|txt|rst)$)' <<<"$files"; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+            echo "Docs-only change: nothing to run."
+          fi
+          if grep -qE '^[.]github/(workflows|actions)/' <<<"$files"; then echo "workflows=true" >> "$GITHUB_OUTPUT"; else echo "workflows=false" >> "$GITHUB_OUTPUT"; fi
+
+  quick:
+    name: quick
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
+    runs-on: ${{ inputs.runner-small == '["codebuild"]' && format('codebuild-pi-actions-{0}-{1}', github.run_id, github.run_attempt) || fromJSON(inputs.runner-small) }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      MODE: ${{ inputs.mode }}
+      IN_QUICK_TEST: ${{ inputs.quick-test-command }}
+      IN_RELEASE_GATE: ${{ inputs.release-gate-command }}
+      STACK: ${{ inputs.stack }}
+      IN_INSTALL: ${{ inputs.install-command }}
+      IN_LINT: ${{ inputs.lint-command }}
+      IN_TYPECHECK: ${{ inputs.typecheck-command }}
+      IN_TEST: ${{ inputs.test-command }}
+      IN_BUILD: ${{ inputs.build-command }}
+      WORKDIR: ${{ inputs.working-directory }}
+    steps:
+      # Depth 2 on a pull request: HEAD^1 is the base branch tip, so a repo's own
+      # phase commands can diff against it without a credentialed fetch.
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: ${{ inputs.mode == 'pr' && '2' || '1' }}
+          persist-credentials: false
+
+      # Cache package downloads (not node_modules or build output) so a repeat
+      # run does not pay for the registry again. Keyed on the lockfile.
+      - name: Locate dependency cache
+        id: depcache
+        shell: bash
+        run: |
+          set -euo pipefail
+          paths=""; lock=""
+          case "$STACK" in
+            node)
+              if [ -f "$WORKDIR/pnpm-lock.yaml" ]; then
+                paths="$HOME/.local/share/pnpm/store"; lock="**/pnpm-lock.yaml"
+              elif [ -f "$WORKDIR/yarn.lock" ]; then
+                paths="$HOME/.cache/yarn"$'\n'"$HOME/.yarn/berry/cache"; lock="**/yarn.lock"
+              else
+                paths="$HOME/.npm"; lock="**/package-lock.json"
+              fi ;;
+            python)
+              paths="$HOME/.cache/pip"; lock="**/requirements*.txt"$'\n'"**/pyproject.toml" ;;
+            rust)
+              paths="$HOME/.cargo/registry"$'\n'"$HOME/.cargo/git"; lock="**/Cargo.lock" ;;
+          esac
+          {
+            echo "paths<<EOF_PATHS"; echo "$paths"; echo "EOF_PATHS"
+            echo "lock<<EOF_LOCK"; echo "$lock"; echo "EOF_LOCK"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Restore dependency cache
+        if: steps.depcache.outputs.paths != ''
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ steps.depcache.outputs.paths }}
+          key: dep-${{ runner.os }}-${{ runner.arch }}-${{ inputs.stack }}-${{ hashFiles(steps.depcache.outputs.lock) }}
+          restore-keys: |
+            dep-${{ runner.os }}-${{ runner.arch }}-${{ inputs.stack }}-
+
+      - name: Set up Node.js
+        if: inputs.stack == 'node'
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      # actions/setup-python ships Ubuntu builds only and fails on the CodeBuild
+      # runner's Amazon Linux 2023 image. uv installs a standalone CPython and a
+      # venv (with pip) that the rest of the job uses as "python".
+      - name: Set up uv
+        if: inputs.stack == 'python'
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: false
+
+      - name: Set up Python
+        if: inputs.stack == 'python'
+        shell: bash
+        env:
+          PYTHON_VERSION: ${{ inputs.python-version }}
+        run: |
+          set -euo pipefail
+          venv="$RUNNER_TEMP/python-venv"
+          uv venv --seed --python "$PYTHON_VERSION" "$venv"
+          echo "VIRTUAL_ENV=$venv" >> "$GITHUB_ENV"
+          echo "$venv/bin" >> "$GITHUB_PATH"
+          "$venv/bin/python" --version
+
+      - name: Set up Go (version from input)
+        if: inputs.stack == 'go' && inputs.go-version != ''
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: ${{ inputs.go-version }}
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+
+      - name: Set up Go (version from go.mod)
+        if: inputs.stack == 'go' && inputs.go-version == ''
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: ${{ inputs.working-directory }}/go.mod
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+
+      - name: Set up Rust
+        if: inputs.stack == 'rust'
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch; the toolchain input selects the version
+        with:
+          toolchain: ${{ inputs.rust-toolchain }}
+          components: clippy, rustfmt
+
+      - name: Set up OpenTofu
+        if: inputs.stack == 'tofu'
+        uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+        with:
+          tofu_version: ${{ inputs.tofu-version }}
+          tofu_wrapper: false
+
+      - name: Resolve commands
+        shell: bash
+        run: |
+          set -euo pipefail
+          install=""; lint=""; typecheck=""; test_cmd=""; build=""; quick_test=""
+          case "$STACK" in
+            node)
+              cd "$WORKDIR"
+              if [ -f pnpm-lock.yaml ]; then
+                pm=pnpm
+                install='corepack enable && pnpm install --frozen-lockfile'
+              elif [ -f yarn.lock ]; then
+                pm=yarn
+                if [ -f .yarnrc.yml ]; then
+                  install='corepack enable && yarn install --immutable'
+                else
+                  install='yarn install --frozen-lockfile'
+                fi
+              elif [ -f package-lock.json ]; then
+                pm=npm
+                install='npm ci'
+              else
+                pm=npm
+                install='npm install'
+              fi
+              phase() {
+                echo "if node -e 'process.exit(require(\"./package.json\").scripts?.[\"$1\"] ? 0 : 1)'; then $pm run $1; else echo \"No $1 script; skipping.\"; fi"
+              }
+              lint="$(phase lint)"; typecheck="$(phase typecheck)"
+              test_cmd="$(phase test)"; build="$(phase build)"
+              has() { echo "node -e 'process.exit(require(\"./package.json\").scripts?.[\"$1\"] ? 0 : 1)'"; }
+              quick_test="if $(has test:quick); then $pm run test:quick; elif $(has test:unit); then $pm run test:unit; else echo \"No test:quick or test:unit script; skipping.\"; fi"
+              ;;
+            python)
+              install='if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; elif [ -f pyproject.toml ]; then python -m pip install -e ".[dev]" || python -m pip install -e .; fi'
+              lint='if python -m ruff --version >/dev/null 2>&1; then python -m ruff check .; else echo "ruff not installed; skipping."; fi'
+              typecheck='if python -m mypy --version >/dev/null 2>&1; then python -m mypy .; else echo "mypy not installed; skipping."; fi'
+              test_cmd='if python -m pytest --version >/dev/null 2>&1; then python -m pytest; else echo "pytest not installed; skipping."; fi'
+              ;;
+            go)
+              install='go mod download'
+              lint='go vet ./...'
+              test_cmd='go test ./...'
+              build='go build ./...'
+              ;;
+            rust)
+              install='cargo fetch --locked'
+              lint='cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings'
+              test_cmd='cargo test --locked'
+              build='cargo build --locked'
+              ;;
+            tofu)
+              install='tofu init -backend=false -input=false'
+              lint='tofu fmt -check -recursive'
+              typecheck='tofu validate'
+              test_cmd='if find . -name "*.tftest.hcl" -not -path "./.terraform/*" | grep -q .; then tofu test; else echo "No tofu tests; skipping."; fi'
+              ;;
+            docs) ;;
+            *) echo "::error::Unknown stack '$STACK' (node|python|go|rust|tofu|docs)."; exit 1 ;;
+          esac
+          # A caller override wins; "-" turns the phase off.
+          pick() { if [ -n "$1" ]; then echo "$1"; else echo "$2"; fi; }
+          # Pull requests run the light phases only. The full suite, the build
+          # and the release gate belong to a production release.
+          if [ "$MODE" = "release" ]; then
+            cmd_test="$(pick "$IN_TEST" "$test_cmd")"; cmd_build="$(pick "$IN_BUILD" "$build")"; cmd_gate="$IN_RELEASE_GATE"
+          else
+            cmd_test="$(pick "$IN_QUICK_TEST" "$quick_test")"; cmd_build="-"; cmd_gate="-"
+          fi
+          {
+            echo "CMD_INSTALL=$(pick "$IN_INSTALL" "$install")"
+            echo "CMD_LINT=$(pick "$IN_LINT" "$lint")"
+            echo "CMD_TYPECHECK=$(pick "$IN_TYPECHECK" "$typecheck")"
+            echo "CMD_TEST=${cmd_test}"
+            echo "CMD_BUILD=${cmd_build}"
+            echo "CMD_GATE=${cmd_gate}"
+          } >> "$GITHUB_ENV"
+
+      - name: Install
+        if: env.CMD_INSTALL != '' && env.CMD_INSTALL != '-'
+        working-directory: ${{ inputs.working-directory }}
+        run: bash -euo pipefail -c "$CMD_INSTALL"
+
+      - name: Lint
+        if: env.CMD_LINT != '' && env.CMD_LINT != '-'
+        working-directory: ${{ inputs.working-directory }}
+        run: bash -euo pipefail -c "$CMD_LINT"
+
+      - name: Typecheck
+        if: env.CMD_TYPECHECK != '' && env.CMD_TYPECHECK != '-'
+        working-directory: ${{ inputs.working-directory }}
+        run: bash -euo pipefail -c "$CMD_TYPECHECK"
+
+      - name: Test
+        if: env.CMD_TEST != '' && env.CMD_TEST != '-'
+        working-directory: ${{ inputs.working-directory }}
+        run: bash -euo pipefail -c "$CMD_TEST"
+
+      - name: Build
+        if: env.CMD_BUILD != '' && env.CMD_BUILD != '-'
+        working-directory: ${{ inputs.working-directory }}
+        run: bash -euo pipefail -c "$CMD_BUILD"
+
+      - name: Release gate
+        if: env.CMD_GATE != '' && env.CMD_GATE != '-'
+        working-directory: ${{ inputs.working-directory }}
+        run: bash -euo pipefail -c "$CMD_GATE"
+
+  secrets:
+    name: secrets
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
+    runs-on: ${{ inputs.runner-small == '["codebuild"]' && format('codebuild-pi-actions-{0}-{1}', github.run_id, github.run_attempt) || fromJSON(inputs.runner-small) }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      # A pull request scans only its own commits (the merge commit plus the
+      # PR's commits), so the checkout stays shallow (100 commits). A release scans history.
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: ${{ inputs.mode == 'release' && '0' || '100' }}
+          persist-credentials: false
+
+      - name: Install gitleaks
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            aarch64|arm64) arch=arm64 ;;
+            x86_64) arch=x64 ;;
+            *) echo "::error::Unsupported architecture $(uname -m)"; exit 1 ;;
+          esac
+          dest="$RUNNER_TEMP/gitleaks"
+          mkdir -p "$dest"
+          artifact="gitleaks_${GITLEAKS_VERSION}_linux_${arch}.tar.gz"
+          base_url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          curl -fsSLo "$RUNNER_TEMP/$artifact" "$base_url/$artifact"
+          curl -fsSLo "$RUNNER_TEMP/gitleaks_checksums.txt" "$base_url/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          grep "  $artifact$" "$RUNNER_TEMP/gitleaks_checksums.txt" | (cd "$RUNNER_TEMP" && sha256sum -c -)
+          tar -xzf "$RUNNER_TEMP/$artifact" -C "$dest" gitleaks
+          echo "$dest" >> "$GITHUB_PATH"
+
+      - name: Scan for secrets
+        shell: bash
+        env:
+          MODE: ${{ inputs.mode }}
+          PR_COMMITS: ${{ github.event.pull_request.commits }}
+        run: |
+          set -euo pipefail
+          if test "$MODE" = "pr" && test -n "$PR_COMMITS"; then
+            if test "$PR_COMMITS" -gt 99; then git fetch --unshallow --quiet || true; fi
+            gitleaks detect --source . --redact --no-banner --log-opts="-n $((PR_COMMITS + 1))"
+          else
+            gitleaks detect --source . --redact --no-banner
+          fi
+
+  deps:
+    name: deps
+    if: inputs.mode == 'release'
+    runs-on: ${{ inputs.runner-small == '["codebuild"]' && format('codebuild-pi-actions-{0}-{1}', github.run_id, github.run_attempt) || fromJSON(inputs.runner-small) }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Install osv-scanner
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            aarch64|arm64) arch=arm64 ;;
+            x86_64) arch=amd64 ;;
+            *) echo "::error::Unsupported architecture $(uname -m)"; exit 1 ;;
+          esac
+          dest="$RUNNER_TEMP/osv"
+          mkdir -p "$dest"
+          artifact="osv-scanner_linux_${arch}"
+          base_url="https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}"
+          curl -fsSLo "$dest/osv-scanner" "$base_url/$artifact"
+          curl -fsSLo "$RUNNER_TEMP/osv-scanner_SHA256SUMS" "$base_url/osv-scanner_SHA256SUMS"
+          expected="$(grep "  $artifact$" "$RUNNER_TEMP/osv-scanner_SHA256SUMS" | cut -d' ' -f1)"
+          test -n "$expected"
+          echo "$expected  $dest/osv-scanner" | sha256sum -c -
+          chmod +x "$dest/osv-scanner"
+          echo "$dest" >> "$GITHUB_PATH"
+
+      - name: Scan dependencies (fail on CRITICAL, annotate HIGH)
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/osv.json"
+          rc=0
+          osv-scanner scan source -r --format json --output-file "$report" . || rc=$?
+          case "$rc" in
+            0|1) ;;
+            128) echo "No supported package sources found."; exit 0 ;;
+            *) echo "::error::osv-scanner failed with exit code $rc"; exit 1 ;;
+          esac
+          test -s "$report" || { echo "No findings report written."; exit 0; }
+
+          findings="$(jq -c '
+            [ .results[]?
+              | .source.path as $src
+              | .packages[]?
+              | .package as $p
+              | .groups[]?
+              | { src: $src, pkg: $p.name, ver: $p.version,
+                  ids: (.ids | join(", ")),
+                  score: (try (.max_severity | tonumber) catch 0) } ]' "$report")"
+
+          critical="$(jq '[.[] | select(.score >= 9.0)] | length' <<<"$findings")"
+          high="$(jq '[.[] | select(.score >= 7.0 and .score < 9.0)] | length' <<<"$findings")"
+
+          jq -r '.[] | select(.score >= 7.0 and .score < 9.0)
+                 | "::warning title=OSV HIGH::\(.pkg)@\(.ver) (\(.ids)) in \(.src)"' <<<"$findings"
+          jq -r '.[] | select(.score >= 9.0)
+                 | "::error title=OSV CRITICAL::\(.pkg)@\(.ver) (\(.ids)) in \(.src)"' <<<"$findings"
+
+          echo "OSV findings: CRITICAL=$critical HIGH=$high"
+          test "$critical" -eq 0
+
+  actions:
+    name: actions
+    needs: changes
+    if: inputs.mode == 'release' || needs.changes.outputs.workflows == 'true'
+    runs-on: ${{ inputs.runner-small == '["codebuild"]' && format('codebuild-pi-actions-{0}-{1}', github.run_id, github.run_attempt) || fromJSON(inputs.runner-small) }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      # actions/setup-python ships Ubuntu builds only and fails on the CodeBuild
+      # runner's Amazon Linux 2023 image. uv installs a standalone CPython and a
+      # venv (with pip) that the rest of the job uses as "python".
+      - name: Set up uv
+        if: inputs.mode == 'release'
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: false
+
+      - name: Set up Python
+        if: inputs.mode == 'release'
+        shell: bash
+        env:
+          PYTHON_VERSION: "3.12"
+        run: |
+          set -euo pipefail
+          venv="$RUNNER_TEMP/python-venv"
+          uv venv --seed --python "$PYTHON_VERSION" "$venv"
+          echo "VIRTUAL_ENV=$venv" >> "$GITHUB_ENV"
+          echo "$venv/bin" >> "$GITHUB_PATH"
+          "$venv/bin/python" --version
+
+      - name: Install actionlint and zizmor
+        shell: bash
+        env:
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            aarch64|arm64) arch=arm64 ;;
+            x86_64) arch=amd64 ;;
+            *) echo "::error::Unsupported architecture $(uname -m)"; exit 1 ;;
+          esac
+          dest="$RUNNER_TEMP/actionlint"
+          mkdir -p "$dest"
+          artifact="actionlint_${ACTIONLINT_VERSION}_linux_${arch}.tar.gz"
+          base_url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}"
+          curl -fsSLo "$RUNNER_TEMP/$artifact" "$base_url/$artifact"
+          curl -fsSLo "$RUNNER_TEMP/actionlint_checksums.txt" "$base_url/actionlint_${ACTIONLINT_VERSION}_checksums.txt"
+          grep "  $artifact$" "$RUNNER_TEMP/actionlint_checksums.txt" | (cd "$RUNNER_TEMP" && sha256sum -c -)
+          tar -xzf "$RUNNER_TEMP/$artifact" -C "$dest" actionlint
+          echo "$dest" >> "$GITHUB_PATH"
+          if test "$MODE" = "release"; then python -m pip install --quiet "zizmor==${ZIZMOR_VERSION}"; fi
+
+      - name: Lint workflows (actionlint; zizmor on a release)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          if ! compgen -G ".depot/workflows/*.y*ml" >/dev/null; then
+            echo "No workflows to lint."
+            exit 0
+          fi
+          actionlint -color=false
+          if test "$MODE" = "release"; then zizmor --min-severity high --no-progress .depot/workflows; fi
+
+  # The single required status check. Fails unless every job above succeeded.
+  pi-checks:
+    name: pi-checks
+    if: always()
+    needs: [changes, quick, secrets, deps, actions]
+    runs-on: ${{ inputs.runner-small == '["codebuild"]' && format('codebuild-pi-actions-{0}-{1}', github.run_id, github.run_attempt) || fromJSON(inputs.runner-small) }}
+    timeout-minutes: 5
+    permissions: {}
+    env:
+      RESULTS: ${{ toJSON(needs.*.result) }}
+    steps:
+      - name: Require every check to pass
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Job results: $RESULTS"
+          # skipped is a pass: docs-only changes and the release-only jobs skip.
+          # A failure upstream still shows as failure in the list.
+          if jq -e 'all(. == "success" or . == "skipped")' <<<"$RESULTS" >/dev/null; then
+            echo "All checks passed."
+          else
+            echo "::error::One or more checks failed or were cancelled."
+            exit 1
+          fi

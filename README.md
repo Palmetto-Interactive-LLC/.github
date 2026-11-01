@@ -70,7 +70,7 @@ uses: Palmetto-Interactive-LLC/.github/.depot/workflows/deliver.yml@<40-char sha
 - `mode: staging`: `depot build --platform linux/amd64`, push to ECR by SHA, read the architecture back from the image, deploy staging from the service's live task definition revision (secret guard, runtimePlatform from the image, staging wake), wait for the PRIMARY deployment to reach COMPLETED. A circuit-breaker or alarm rollback fails the run and says which.
 - `mode: release`: no build. Requires the image for the head of main and staging running that exact digest, gates on the ECR CRITICAL scan, cuts `vYYYY.MM.DD.N`, deploys the same digest to prod with the migration. Only the head of main is delivered; to roll back, revert on main and release again.
 - AWS auth is Depot's OIDC token (`identity.depot.dev`) through `aws-actions/configure-aws-credentials`. The IAM roles trust the Depot sub for the repo on `main`, set up in pi-platform (`github.depot_ci`).
-- Repo variables are Depot CI variables (`depot ci vars add NAME --value V --repo owner/repo`): `ECS_DEPLOY_ENABLED`, `PI_PLATFORM_IMAGE_PUSH_ROLE_ARN`, `ECS_DEPLOY_ROLE_ARN`, `ECS_SERVING_SECRETS`. GitHub Actions variables are not visible to Depot.
+- Repo variables are Depot CI variables (`depot ci vars add NAME --value V --repo owner/repo`): `ECS_DEPLOY_ENABLED`, `PI_PLATFORM_IMAGE_PUSH_ROLE_ARN`, `ECS_DEPLOY_ROLE_ARN`, `ECS_SERVING_SECRETS`. They do not resolve inside the shared (external) workflow, so the caller passes them as inputs: `deploy-enabled: ${{ vars.ECS_DEPLOY_ENABLED }}`, `push-role-arn`, `deploy-role-arn`, `serving-secrets`. GitHub Actions variables are not visible to Depot.
 - The snippets under `scripts/tests/` run the marked blocks of this file against fakes.
 
 ## pi-checks

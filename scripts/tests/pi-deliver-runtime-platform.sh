@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs the "runtime-platform" lines exactly as pi-deliver.yml ships them
+# Runs the "runtime-platform" lines exactly as .depot/workflows/deliver.yml ships them
 # (between their BEGIN/END markers) against fixtures, and checks that the
 # registered revision's runtimePlatform.cpuArchitecture follows the image:
 #
@@ -9,7 +9,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-workflow="$repo_root/.github/workflows/pi-deliver.yml"
+workflow="$repo_root/.depot/workflows/deliver.yml"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Runs the "rollback-cause" lines exactly as pi-deliver.yml ships them (between
+# Runs the "rollback-cause" lines exactly as .depot/workflows/deliver.yml ships them (between
 # its BEGIN/END markers) against DescribeServices output for a deployment ECS
 # failed and rolled back, and checks the error names the real cause.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-workflow="$repo_root/.github/workflows/pi-deliver.yml"
+workflow="$repo_root/.depot/workflows/deliver.yml"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 

@@ -1,0 +1,32 @@
+# Required check "CI / ci" on this repository (Depot CI). Runs the shipped
+# workflow snippets against fakes and lints every workflow.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Script tests
+        run: |
+          set -euo pipefail
+          for t in scripts/tests/*.sh; do echo "== $t"; bash "$t"; done
+      - name: Workflow YAML parses
+        run: |
+          set -euo pipefail
+          for f in .depot/workflows/*.yml; do python3 -c 'import sys,yaml;yaml.safe_load(open(sys.argv[1]))' "$f" || { python3 -m pip -q install pyyaml && python3 -c 'import sys,yaml;yaml.safe_load(open(sys.argv[1]))' "$f"; }; done

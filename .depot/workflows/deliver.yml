@@ -87,6 +87,10 @@ on:
         description: 'Path in the caller repo of the ECR scan allowlist {"allow":[{"id","reason","expires"?}]}. A missing file allows nothing.'
         type: string
         default: .github/ecr-scan-allowlist.json
+    secrets:
+      incident-io-url:
+        description: 'Optional. The INCIDENT_IO_CI_ALERT_URL Depot CI secret (incident.io "CI" HTTP alert source URL incl. token). A failed delivery posts a non-paging alert to it.'
+        required: false
     outputs:
       version:
         description: The release tag (release) or sha-<12>.
@@ -187,6 +191,11 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
+
+      # Puts the depot CLI on PATH. Inside Depot CI the injected DEPOT_TOKEN
+      # authenticates depot build (no OIDC trust policy or stored token needed).
+      - name: Set up Depot
+        uses: depot/setup-action@91bc8495a33ebfc504ffc89e5674379ccf23c29c # v1
 
       - name: Validate
         shell: bash
@@ -681,3 +690,34 @@ jobs:
             jq -r '.[] | "- Image: `\(.repo)@\(.digest)` (linux/\(.arch // "unknown"))"' <<<"$IMAGES"
             if test -n "$DEPLOY"; then jq -r '.[] | "- Task definition: `\(.arn | split("/")[-1])`"' <<<"$DEPLOY"; fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # Non-paging alert to incident.io (the "CI" HTTP alert source) when any
+  # delivery job failed. A skipped delivery (stale head, disabled) is not a failure.
+  alert:
+    name: Alert on failure
+    needs: [guard, build, release, deploy]
+    if: failure()
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Post to incident.io
+        shell: bash
+        env:
+          ALERT_URL: ${{ secrets.incident-io-url }}
+          REPO: ${{ github.repository }}
+          MODE: ${{ inputs.mode }}
+          APP: ${{ inputs.app }}
+        run: |
+          set -euo pipefail
+          if test -z "$ALERT_URL"; then
+            echo "::notice::No incident-io-url secret passed. Not alerting."; exit 0
+          fi
+          echo "::add-mask::$ALERT_URL"
+          payload="$(jq -nc --arg app "$APP" --arg mode "$MODE" --arg repo "$REPO" --arg sha "$GITHUB_SHA" --arg job "${DEPOT_JOB_URL:-}" \
+            '{title: "Delivery failed: \($app) (\($mode))",
+              description: "\($repo) @ \($sha[0:12]) failed to deliver (\($mode)). Run: \($job)",
+              deduplication_key: "deliver-\($repo)-\($mode)-\($sha)",
+              status: "firing"}')"
+          code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 -X POST -H 'Content-Type: application/json' -d "$payload" "$ALERT_URL" 2>/dev/null || true)"
+          case "$code" in 2??) echo "Alert sent." ;; *) echo "::warning::incident.io alert returned HTTP ${code:-none}." ;; esac

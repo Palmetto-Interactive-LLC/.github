@@ -10,7 +10,7 @@ concurrency:
 jobs:
   ci:
     runs-on: depot-ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -19,3 +19,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - run: make ci
+      - name: Workflow YAML parses
+        run: |
+          set -euo pipefail
+          for f in .depot/workflows/*.yml; do python3 -c 'import sys,yaml;yaml.safe_load(open(sys.argv[1]))' "$f" || { python3 -m pip -q install pyyaml && python3 -c 'import sys,yaml;yaml.safe_load(open(sys.argv[1]))' "$f"; }; done

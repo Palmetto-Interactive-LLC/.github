@@ -760,6 +760,7 @@ jobs:
             # (DATABASE_MIGRATOR_URL, a one-off token), and copying it would put
             # that secret into the serving container (2026-10-30).
             # Tested by scripts/tests/pi-deliver-secret-guard.sh.
+            # shellcheck disable=SC2016
             base="$(aws ecs describe-services --cluster "$CLUSTER" --services "$family" \
               --query 'services[?status==`ACTIVE`] | [0].taskDefinition' --output text)"
             case "$base" in

@@ -44,3 +44,6 @@ jobs:
 
       - name: pi-deliver secret guard
         run: bash scripts/tests/pi-deliver-secret-guard.sh
+
+      - name: pi-deliver runtime platform follows the image
+        run: bash scripts/tests/pi-deliver-runtime-platform.sh

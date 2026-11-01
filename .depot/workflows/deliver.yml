@@ -89,7 +89,7 @@ on:
         default: .github/ecr-scan-allowlist.json
     secrets:
       incident-io-url:
-        description: 'Optional. The INCIDENT_IO_CI_URL Depot CI secret (incident.io "CI" HTTP alert source URL incl. token). A failed delivery posts a non-paging alert to it.'
+        description: 'Optional. The INCIDENT_IO_CI_ALERT_URL Depot CI secret (incident.io "CI" HTTP alert source URL incl. token). A failed delivery posts a non-paging alert to it.'
         required: false
     outputs:
       version:

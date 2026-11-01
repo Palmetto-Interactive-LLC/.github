@@ -1,13 +1,11 @@
-# Palmetto standard pull-request checks (reusable). One required status check
-# everywhere: the final "pi-checks" job. See README.md ("CI/CD standard").
+# Palmetto standard pull-request checks on Depot CI (reusable). One required
+# status check everywhere: the final "pi-checks" job. See README.md.
 #
-# Reusable workflows run on the CALLER's runners, so every job takes its
-# runs-on from the runner-small input: a JSON array of labels read with
-# fromJSON. The default '["codebuild"]' is expanded to the org CodeBuild runner
-# label, codebuild-pi-actions-<run_id>-<run_attempt> (arm1.small, Amazon Linux
-# 2023, arm64), which CodeBuild needs per run. Callers pass nothing; this is the
-# one place the label lives. The tool installers below pick the right binary
-# for arm64 or x86_64.
+# Callers (in .depot/workflows) pin this file by full SHA:
+#   uses: Palmetto-Interactive-LLC/.github/.depot/workflows/pi-checks.yml@<sha>
+# Every job runs on Depot's x86_64 sandboxes (depot-ubuntu-24.04). Depot CI
+# serves actions/cache from Depot Cache. The tool installers below pick the right
+# binary for arm64 or x86_64.
 #
 # Every caller-supplied value reaches a shell through env:, never inline in run:.
 name: PI Checks
@@ -31,13 +29,6 @@ on:
           zizmor, release-gate-command). Called by pi-release.yml.
         type: string
         default: pr
-      runner-small:
-        description: >-
-          runs-on for every job, as a JSON array of labels. The default
-          '["codebuild"]' means the org CodeBuild runner on arm1.small.
-          Callers should not override it.
-        type: string
-        default: '["codebuild"]'
       stack:
         description: "Toolchain and default commands: node | python | go | rust | tofu | docs"
         type: string
@@ -121,7 +112,7 @@ jobs:
   # licenses, images) skip every other job. Release mode never skips.
   changes:
     name: changes
-    runs-on: ${{ inputs.runner-small == '["codebuild"]' && format('codebuild-pi-actions-{0}-{1}', github.run_id, github.run_attempt) || fromJSON(inputs.runner-small) }}
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -159,13 +150,13 @@ jobs:
             echo "docs_only=true" >> "$GITHUB_OUTPUT"
             echo "Docs-only change: nothing to run."
           fi
-          if grep -qE '^[.]github/(workflows|actions)/' <<<"$files"; then echo "workflows=true" >> "$GITHUB_OUTPUT"; else echo "workflows=false" >> "$GITHUB_OUTPUT"; fi
+          if grep -qE '^[.](github|depot)/(workflows|actions)/' <<<"$files"; then echo "workflows=true" >> "$GITHUB_OUTPUT"; else echo "workflows=false" >> "$GITHUB_OUTPUT"; fi
 
   quick:
     name: quick
     needs: changes
     if: needs.changes.outputs.docs_only != 'true'
-    runs-on: ${{ inputs.runner-small == '["codebuild"]' && format('codebuild-pi-actions-{0}-{1}', github.run_id, github.run_attempt) || fromJSON(inputs.runner-small) }}
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -232,9 +223,8 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
 
-      # actions/setup-python ships Ubuntu builds only and fails on the CodeBuild
-      # runner's Amazon Linux 2023 image. uv installs a standalone CPython and a
-      # venv (with pip) that the rest of the job uses as "python".
+      # uv installs a standalone CPython and a venv (with pip) that the rest of
+      # the job uses as "python".
       - name: Set up uv
         if: inputs.stack == 'python'
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
@@ -394,7 +384,7 @@ jobs:
     name: secrets
     needs: changes
     if: needs.changes.outputs.docs_only != 'true'
-    runs-on: ${{ inputs.runner-small == '["codebuild"]' && format('codebuild-pi-actions-{0}-{1}', github.run_id, github.run_attempt) || fromJSON(inputs.runner-small) }}
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -444,7 +434,7 @@ jobs:
   deps:
     name: deps
     if: inputs.mode == 'release'
-    runs-on: ${{ inputs.runner-small == '["codebuild"]' && format('codebuild-pi-actions-{0}-{1}', github.run_id, github.run_attempt) || fromJSON(inputs.runner-small) }}
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -515,7 +505,7 @@ jobs:
     name: actions
     needs: changes
     if: inputs.mode == 'release' || needs.changes.outputs.workflows == 'true'
-    runs-on: ${{ inputs.runner-small == '["codebuild"]' && format('codebuild-pi-actions-{0}-{1}', github.run_id, github.run_attempt) || fromJSON(inputs.runner-small) }}
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -526,9 +516,8 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
-      # actions/setup-python ships Ubuntu builds only and fails on the CodeBuild
-      # runner's Amazon Linux 2023 image. uv installs a standalone CPython and a
-      # venv (with pip) that the rest of the job uses as "python".
+      # uv installs a standalone CPython and a venv (with pip) that the rest of
+      # the job uses as "python".
       - name: Set up uv
         if: inputs.mode == 'release'
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
@@ -570,6 +559,8 @@ jobs:
           echo "$dest" >> "$GITHUB_PATH"
           if test "$MODE" = "release"; then python -m pip install --quiet "zizmor==${ZIZMOR_VERSION}"; fi
 
+      # Lints .github/workflows and .depot/workflows. Depot runner labels
+      # (depot-ubuntu-24.04[-N], -arm) are declared to actionlint as self-hosted.
       - name: Lint workflows (actionlint; zizmor on a release)
         shell: bash
         env:
@@ -577,19 +568,27 @@ jobs:
           MODE: ${{ inputs.mode }}
         run: |
           set -euo pipefail
-          if ! compgen -G ".github/workflows/*.y*ml" >/dev/null; then
+          dirs=()
+          for d in .github/workflows .depot/workflows; do
+            if compgen -G "$d/*.y*ml" >/dev/null; then dirs+=("$d"); fi
+          done
+          if test "${#dirs[@]}" -eq 0; then
             echo "No workflows to lint."
             exit 0
           fi
-          actionlint -color=false
-          if test "$MODE" = "release"; then zizmor --min-severity high --no-progress .github/workflows; fi
+          cfg="$RUNNER_TEMP/actionlint.yaml"
+          printf 'self-hosted-runner:\n  labels:\n    - depot-*\n' | tee "$cfg" >/dev/null
+          files=()
+          for d in "${dirs[@]}"; do files+=("$d"/*.y*ml); done
+          actionlint -color=false -config-file "$cfg" "${files[@]}"
+          if test "$MODE" = "release"; then zizmor --min-severity high --no-progress "${dirs[@]}"; fi
 
   # The single required status check. Fails unless every job above succeeded.
   pi-checks:
     name: pi-checks
     if: always()
     needs: [changes, quick, secrets, deps, actions]
-    runs-on: ${{ inputs.runner-small == '["codebuild"]' && format('codebuild-pi-actions-{0}-{1}', github.run_id, github.run_attempt) || fromJSON(inputs.runner-small) }}
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 5
     permissions: {}
     env:

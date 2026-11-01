@@ -7,8 +7,7 @@ on:
   push:
     branches: [main]
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -18,14 +17,14 @@ jobs:
   ci:
     runs-on: depot-ubuntu-24.04
     timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          fetch-depth: 0
           persist-credentials: false
-      - name: Script tests
-        run: |
-          set -euo pipefail
-          for t in scripts/tests/*.sh; do echo "== $t"; bash "$t"; done
+      - run: make ci
       - name: Workflow YAML parses
         run: |
           set -euo pipefail

@@ -38,7 +38,7 @@ on:
         type: string
         required: true
       images:
-        description: JSON list of {name, dockerfile, context[, container]}. name is the ECR repository suffix. container defaults to the main container for "web" and to name otherwise.
+        description: JSON list of {name, dockerfile, context[, container][, next-static]}. name is the ECR repository suffix. container defaults to the main container for "web" and to name otherwise. next-static is the .next/static directory inside the image (see static-buckets).
         type: string
         default: '[{"name":"web","dockerfile":"Dockerfile","context":"."}]'
       services:
@@ -97,6 +97,15 @@ on:
         description: 'Path in the caller repo of the ECR scan allowlist {"allow":[{"id","reason","expires"?}]}. A missing file allows nothing.'
         type: string
         default: .github/ecr-scan-allowlist.json
+      static-buckets:
+        description: >-
+          Optional JSON {"<image name>": "<bucket>"}. Each image whose images
+          entry has "next-static" (its .next/static directory inside the image)
+          publishes those files to s3://<bucket>/_next/static/ before the deploy.
+          Pass the NEXT_STATIC_BUCKET_<SERVICE> variables; the push role must be
+          allowed to write the bucket.
+        type: string
+        default: ""
       posthog-project-id:
         description: 'Pass the POSTHOG_PROJECT_ID Depot CI variable (optional). With the POSTHOG_ANNOTATION_KEY secret, a prod deploy posts a PostHog annotation.'
         type: string
@@ -361,6 +370,55 @@ jobs:
             done
           done < <(jq -c '.[]' <<<"$BUILT")
           test "$blocked" -eq 0 || { echo "::error::CRITICAL image findings block this release. Nothing was deployed."; exit 1; }
+
+      # Opt-in (static-buckets). Copies each image's Next.js hashed assets (the
+      # image's "next-static" directory) to s3://<bucket>/_next/static/ before
+      # anything deploys, so new HTML never points at an asset the CDN lacks.
+      # No --delete: pages still served by the previous revision keep theirs.
+      - name: Publish Next.js static assets
+        if: inputs.static-buckets != ''
+        shell: bash
+        env:
+          BUILT: ${{ steps.build.outputs.images }}
+          STATIC_BUCKETS: ${{ inputs.static-buckets }}
+        run: |
+          set -euo pipefail
+          # BEGIN next-static
+          jq -e 'type == "object" and all(.[]; type == "string")' <<<"$STATIC_BUCKETS" >/dev/null \
+            || { echo "::error::static-buckets must be a JSON object {\"<image name>\": \"<bucket>\"}."; exit 1; }
+          cache="public, max-age=31536000, immutable"
+          # Types set explicitly; anything else keeps the CLI's guess.
+          types="css=text/css js=text/javascript mjs=text/javascript map=application/json json=application/json woff2=font/woff2 woff=font/woff svg=image/svg+xml txt=text/plain"
+          while read -r image; do
+            name="$(jq -r .name <<<"$image")"
+            src="$(jq -r '."next-static" // empty' <<<"$image")"
+            test -n "$src" || continue
+            bucket="$(jq -r --arg n "$name" '.[$n] // empty' <<<"$STATIC_BUCKETS")"
+            if test -z "$bucket"; then
+              echo "::warning::${name}: next-static is set but static-buckets has no bucket for it. Not published."; continue
+            fi
+            ref="$(jq -r --arg n "$name" 'map(select(.name == $n))[0].ref // empty' <<<"$BUILT")"
+            arch="$(jq -r --arg n "$name" 'map(select(.name == $n))[0].arch // "amd64" | split(",")[0]' <<<"$BUILT")"
+            test -n "$ref" || { echo "::error::${name}: no image in this build."; exit 1; }
+            dir="$(mktemp -d)"
+            docker pull -q --platform "linux/${arch}" "$ref" >/dev/null
+            id="$(docker create --platform "linux/${arch}" "$ref")"
+            docker cp "${id}:${src%/}/." "$dir/"
+            docker rm -f "$id" >/dev/null
+            count="$(find "$dir" -type f | wc -l | tr -d ' ')"
+            test "$count" -gt 0 || { echo "::error::${name}: ${src} is empty or missing in ${ref}."; exit 1; }
+            dest="s3://${bucket}/_next/static/"
+            rest=()
+            for pair in $types; do
+              ext="${pair%%=*}"; rest+=(--exclude "*.${ext}")
+              aws s3 sync "$dir" "$dest" --only-show-errors --exclude '*' --include "*.${ext}" \
+                --content-type "${pair#*=}" --cache-control "$cache"
+            done
+            aws s3 sync "$dir" "$dest" --only-show-errors "${rest[@]}" --cache-control "$cache"
+            echo "${name}: ${count} files from ${src} in s3://${bucket}/_next/static/"
+            rm -rf "$dir"
+          done < <(jq -c '.[]' <<<"$IMAGES_INPUT")
+          # END next-static
 
       - name: Choose the version
         id: version

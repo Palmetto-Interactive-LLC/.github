@@ -1,6 +1,7 @@
 # Palmetto delivery for ECS apps on Depot CI (reusable). Two modes:
 #
-#   staging (push to main): build the linux/amd64 image with depot build, push it
+#   staging (push to main): build the image with depot build (linux/amd64 unless
+#     the caller passes platforms, e.g. linux/amd64,linux/arm64), push it
 #     to ECR by full git SHA, deploy STAGING, wait for the new revision to be
 #     the primary, completed deployment.
 #   release (workflow_dispatch on main): build nothing. Require the image for
@@ -44,6 +45,15 @@ on:
         description: JSON list of service names. Defaults to [app]. Each runs as <service>-<env>.
         type: string
         default: ""
+      platforms:
+        description: >-
+          Comma-separated depot build platforms. linux/amd64 (default) builds one
+          image manifest and pins the revision to X86_64. linux/amd64,linux/arm64
+          pushes a multi-arch index and registers the revision without a
+          runtimePlatform, so ECS places it on x86_64 or arm64 hosts and each host
+          pulls its own architecture.
+        type: string
+        default: linux/amd64
       container-name:
         description: Main container name (receives the "web" image).
         type: string
@@ -231,14 +241,17 @@ jobs:
         with:
           mask-password: true
 
-      - name: Build and push amd64 images (skipped when the SHA tag exists)
+      - name: Build and push images (skipped when the SHA tag exists)
         id: build
         shell: bash
         env:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
           MAIN_CONTAINER: ${{ inputs.container-name }}
+          PLATFORMS: ${{ inputs.platforms }}
         run: |
           set -euo pipefail
+          [[ "$PLATFORMS" =~ ^linux/(amd64|arm64)(,linux/(amd64|arm64))?$ ]] \
+            || { echo "::error::platforms must be linux/amd64, linux/arm64 or both (got '${PLATFORMS}')."; exit 1; }
           result='[]'
           while read -r image; do
             name="$(jq -r .name <<<"$image")"
@@ -255,10 +268,11 @@ jobs:
               if test "$MODE" != "staging"; then
                 echo "::error::${repo}:${SOURCE_SHA} is not in ECR. A release never builds: let the staging deploy of this commit finish first."; exit 1
               fi
-              echo "::group::Build ${repo} (linux/amd64)"
-              # One plain image manifest (no attestation index), so the digest
-              # promoted to prod is the image itself.
-              depot build --project "$DEPOT_PROJECT_ID" --platform linux/amd64 --provenance=false --sbom=false \
+              echo "::group::Build ${repo} (${PLATFORMS})"
+              # No attestations: one platform gives one plain image manifest, two
+              # give an index holding only the two platform manifests. The digest
+              # promoted to prod is that manifest or index.
+              depot build --project "$DEPOT_PROJECT_ID" --platform "$PLATFORMS" --provenance=false --sbom=false \
                 --label "org.opencontainers.image.revision=${SOURCE_SHA}" \
                 --label "org.opencontainers.image.source=https://github.com/${SOURCE_REPOSITORY}" \
                 --file "$dockerfile" --tag "$uri" --push "$context"
@@ -268,14 +282,19 @@ jobs:
             fi
             rm -f "$err"
 
-            # Read the architecture back from ECR. The deploy job writes the
-            # task definition's runtimePlatform from it, so a revision always
-            # matches its image.
-            arch="$(docker buildx imagetools inspect "$uri" --format '{{json .Image}}' | jq -r '.architecture // empty')"
+            # Read the architecture(s) back from ECR. The deploy job writes the
+            # task definition's runtimePlatform from them, so a revision always
+            # matches its image. An index inspects as a map of platform -> image;
+            # arch is "amd64", "arm64" or "amd64,arm64".
+            arch="$(docker buildx imagetools inspect "$uri" --format '{{json .Image}}' \
+              | jq -r 'if has("architecture") then [.architecture] else [.[].architecture] end
+                       | map(select(. != null and . != "unknown")) | unique | join(",")')"
             case "$arch" in
-              amd64|arm64) echo "${repo}:${SOURCE_SHA} is linux/${arch}" ;;
-              *) echo "::error::${repo}:${SOURCE_SHA} has architecture '${arch:-unknown}', not amd64 or arm64."; exit 1 ;;
+              amd64|arm64|amd64,arm64) echo "${repo}:${SOURCE_SHA} is linux/${arch}" ;;
+              *) echo "::error::${repo}:${SOURCE_SHA} has architecture '${arch:-unknown}', not amd64, arm64 or both."; exit 1 ;;
             esac
+            want="$(tr ',' '\n' <<<"$PLATFORMS" | sed 's|^linux/||' | sort -u | paste -sd, -)"
+            test "$arch" = "$want" || echo "::warning::${repo}:${SOURCE_SHA} is linux/${arch}, not ${want} (pushed before platforms changed). Its revision follows the image."
 
             digest="$(aws ecr describe-images --repository-name "$repo" --image-ids "imageTag=${SOURCE_SHA}" \
               --query 'imageDetails[0].imageDigest' --output text)"
@@ -306,7 +325,14 @@ jobs:
           fi
           blocked=0
           while read -r image; do
-            repo="$(jq -r .repo <<<"$image")"; digest="$(jq -r .digest <<<"$image")"
+            repo="$(jq -r .repo <<<"$image")"; index="$(jq -r .digest <<<"$image")"
+            # ECR scans platform manifests, not a multi-arch index: gate each one.
+            children="$(aws ecr batch-get-image --repository-name "$repo" --image-ids "imageDigest=${index}" \
+              --accepted-media-types application/vnd.oci.image.index.v1+json application/vnd.docker.distribution.manifest.list.v2+json \
+                application/vnd.oci.image.manifest.v1+json application/vnd.docker.distribution.manifest.v2+json \
+              --query 'images[0].imageManifest' --output text \
+              | jq -r '[.manifests[]? | select((.platform.architecture // "unknown") != "unknown") | .digest] | join(" ")')"
+            for digest in ${children:-$index}; do
             status=NOT_STARTED
             for _ in $(seq 60); do
               if scan="$(aws ecr describe-image-scan-findings --repository-name "$repo" --image-id "imageDigest=${digest}" --output json 2>/dev/null)"; then
@@ -332,6 +358,7 @@ jobs:
               echo "::error::${repo}: CRITICAL findings not allowlisted: $(jq -r 'join(", ")' <<<"$open"). Fix the image, or allowlist them with a reason."
               blocked=1
             fi
+            done
           done < <(jq -c '.[]' <<<"$BUILT")
           test "$blocked" -eq 0 || { echo "::error::CRITICAL image findings block this release. Nothing was deployed."; exit 1; }
 
@@ -495,12 +522,21 @@ jobs:
             # BEGIN runtime-platform
             # The revision's CPU architecture follows its image, not the copied
             # live revision: ECS places an X86_64 revision only on x86_64 hosts
-            # and an ARM64 one only on arm64 hosts. Tested by
-            # scripts/tests/pi-deliver-runtime-platform.sh.
-            cpu_arch="$(jq -r '{amd64: "X86_64", arm64: "ARM64"}[.[0].arch // ""] // empty' <<<"$IMAGES")"
-            test -n "$cpu_arch" || { echo "::error::No known architecture on the images of this build ($(jq -c '[.[].arch]' <<<"$IMAGES"))."; exit 1; }
-            jq --arg a "$cpu_arch" '.runtimePlatform = {cpuArchitecture: $a, operatingSystemFamily: "LINUX"}' \
-              "$workdir/${family}.json" > "$workdir/${family}.rp.json"
+            # and an ARM64 one only on arm64 hosts. A multi-arch image (amd64 and
+            # arm64) gets no runtimePlatform: the EC2 task places on either kind
+            # of host and each pulls its own architecture from the index. Tested
+            # by scripts/tests/pi-deliver-runtime-platform.sh.
+            img_arch="$(jq -r '.[0].arch // ""' <<<"$IMAGES")"
+            if test "$img_arch" = "amd64,arm64"; then
+              rp_filter='del(.runtimePlatform)'
+              cpu_arch="any (multi-arch image)"
+            else
+              cpu_arch="$(jq -rn --arg a "$img_arch" '{amd64: "X86_64", arm64: "ARM64"}[$a] // empty')"
+              test -n "$cpu_arch" || { echo "::error::No known architecture on the images of this build ($(jq -c '[.[].arch]' <<<"$IMAGES"))."; exit 1; }
+              # shellcheck disable=SC2016 # $a is a jq variable
+              rp_filter='.runtimePlatform = {cpuArchitecture: $a, operatingSystemFamily: "LINUX"}'
+            fi
+            jq --arg a "$cpu_arch" "$rp_filter" "$workdir/${family}.json" > "$workdir/${family}.rp.json"
             mv "$workdir/${family}.rp.json" "$workdir/${family}.json"
             echo "Runtime platform for ${family}: ${cpu_arch}"
             # END runtime-platform

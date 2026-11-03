@@ -22,6 +22,12 @@
 #     this commit in ECR and staging running that exact digest, gate on ECR's
 #     CRITICAL scan, cut the release tag vYYYY.MM.DD.N, then deploy the SAME
 #     digest to prod (with the migration).
+#   release with digest (rollback): build nothing and cut no tag. The digest
+#     must be listed in a published GitHub Release of this repository; any
+#     other digest is refused before AWS is touched. Every image comes from
+#     that release, the staging check is skipped (staging runs something
+#     newer), and the ECR scan gate still runs. The version is that release's
+#     tag.
 #
 # Prod is reachable only from release, and release runs only on a
 # workflow_dispatch from refs/heads/main. Only the head of main is deployed.
@@ -82,6 +88,13 @@ on:
         description: staging (default) or release.
         type: string
         default: staging
+      digest:
+        description: >-
+          Release mode only. Roll prod back to this image digest (sha256:<64 hex>).
+          It must be listed in a published GitHub Release of this repository;
+          anything else is refused. Empty promotes the image of this commit.
+        type: string
+        default: ""
       migrate-command:
         description: Optional pre-deploy migration, run once per environment as a one-off ECS task. A string runs under "sh -c", a JSON array is the exact command.
         type: string
@@ -177,8 +190,12 @@ jobs:
         shell: bash
         env:
           MODE: ${{ inputs.mode }}
+          DIGEST: ${{ inputs.digest }}
         run: |
           set -euo pipefail
+          if test -n "$DIGEST" && test "$MODE" != "release"; then
+            echo "::error::digest (a rollback) is for mode=release only."; exit 1
+          fi
           case "$MODE" in
             staging) ;;
             release)
@@ -235,6 +252,7 @@ jobs:
       SOURCE_SHA: ${{ github.sha }}
       SOURCE_REPOSITORY: ${{ github.repository }}
       MODE: ${{ inputs.mode }}
+      DIGEST: ${{ inputs.digest }}
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -257,6 +275,41 @@ jobs:
           jq -e 'type == "array" and length > 0 and all(.[]; has("name") and has("dockerfile") and has("context"))' <<<"$IMAGES_INPUT" >/dev/null \
             || { echo "::error::images must be a JSON list of {name, dockerfile, context}."; exit 1; }
 
+      # Rollback only. Runs before any AWS credentials exist: a digest that no
+      # published release lists is refused here.
+      - name: Resolve the rollback target (a prior release)
+        id: rollback
+        if: inputs.digest != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # BEGIN rollback-target
+          # The digest must be listed in a published (not draft, not prerelease)
+          # GitHub Release of this repository. Every image of the app is taken
+          # from that one release, so a multi-image app rolls back as a unit.
+          # Tested by scripts/tests/pi-deliver-rollback-target.sh.
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
+            || { echo "::error::digest must be sha256:<64 hex> (got '${DIGEST}'). Refused."; exit 1; }
+          releases="$(gh api --paginate "repos/${SOURCE_REPOSITORY}/releases?per_page=100" | jq -cs 'add // []')"
+          match="$(jq -c --arg d "$DIGEST" '[.[] | select((.draft | not) and (.prerelease | not)
+              and ((.body // "") | contains("@" + $d + "`")))] | sort_by(.published_at) | last // empty' <<<"$releases")"
+          test -n "$match" \
+            || { echo "::error::${DIGEST} is not in any published release of ${SOURCE_REPOSITORY}. A rollback deploys only a prior release's digest. Refused."; exit 1; }
+          rollback_tag="$(jq -r .tag_name <<<"$match")"
+          pins='{}'
+          while read -r image; do
+            repo="${APP}/$(jq -r .name <<<"$image")"
+            pin="$(jq -r .body <<<"$match" | grep -oE "\`${repo}@sha256:[0-9a-f]{64}\`" | head -n 1 | sed -E 's/^.*@(sha256:[0-9a-f]{64}).*$/\1/' || true)"
+            test -n "$pin" || { echo "::error::Release ${rollback_tag} lists no digest for ${repo}. Refused."; exit 1; }
+            pins="$(jq -c --arg r "$repo" --arg d "$pin" '. + {($r): $d}' <<<"$pins")"
+          done < <(jq -c '.[]' <<<"$IMAGES_INPUT")
+          echo "Rollback target: release ${rollback_tag}: $(jq -c . <<<"$pins")"
+          # END rollback-target
+          echo "tag=${rollback_tag}" >> "$GITHUB_OUTPUT"
+          echo "pins=${pins}" >> "$GITHUB_OUTPUT"
+
       - name: Configure AWS credentials through GitHub OIDC (image push)
         uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
         with:
@@ -278,6 +331,8 @@ jobs:
           MAIN_CONTAINER: ${{ inputs.container-name }}
           PLATFORMS: ${{ inputs.platforms }}
           DEPOT_TOKEN: ${{ secrets.depot_token }}
+          PINS: ${{ steps.rollback.outputs.pins }}
+          ROLLBACK_TAG: ${{ steps.rollback.outputs.tag }}
         run: |
           set -euo pipefail
           [[ "$PLATFORMS" =~ ^linux/(amd64|arm64)(,linux/(amd64|arm64))?$ ]] \
@@ -291,6 +346,15 @@ jobs:
             repo="${APP}/${name}"
             uri="${REGISTRY}/${repo}:${SOURCE_SHA}"
 
+            if test -n "$DIGEST"; then
+              # Rollback: the release's digest, which must still be in ECR.
+              digest="$(jq -r --arg r "$repo" '.[$r] // empty' <<<"$PINS")"
+              [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::No rollback digest resolved for ${repo}."; exit 1; }
+              aws ecr describe-images --repository-name "$repo" --image-ids "imageDigest=${digest}" >/dev/null \
+                || { echo "::error::${repo}@${digest} (release ${ROLLBACK_TAG}) is no longer in ECR."; exit 1; }
+              uri="${REGISTRY}/${repo}@${digest}"
+              echo "Rollback: ${repo}@${digest} from release ${ROLLBACK_TAG}"
+            else
             err="$(mktemp)"
             if aws ecr describe-images --repository-name "$repo" --image-ids "imageTag=${SOURCE_SHA}" >/dev/null 2>"$err"; then
               echo "::notice::${repo}:${SOURCE_SHA} already exists in ECR; reusing it."
@@ -311,6 +375,7 @@ jobs:
               cat "$err"; echo "::error::Could not check ECR for ${repo}:${SOURCE_SHA}."; exit 1
             fi
             rm -f "$err"
+            fi
 
             # Read the architecture(s) back from ECR. The deploy job writes the
             # task definition's runtimePlatform from them, so a revision always
@@ -326,8 +391,10 @@ jobs:
             want="$(tr ',' '\n' <<<"$PLATFORMS" | sed 's|^linux/||' | sort -u | paste -sd, -)"
             test "$arch" = "$want" || echo "::warning::${repo}:${SOURCE_SHA} is linux/${arch}, not ${want} (pushed before platforms changed). Its revision follows the image."
 
-            digest="$(aws ecr describe-images --repository-name "$repo" --image-ids "imageTag=${SOURCE_SHA}" \
-              --query 'imageDetails[0].imageDigest' --output text)"
+            if test -z "$DIGEST"; then
+              digest="$(aws ecr describe-images --repository-name "$repo" --image-ids "imageTag=${SOURCE_SHA}" \
+                --query 'imageDetails[0].imageDigest' --output text)"
+            fi
             [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::ECR returned no valid digest for ${repo}."; exit 1; }
             result="$(jq -c --arg name "$name" --arg repo "$repo" --arg container "$container" \
               --arg ref "${REGISTRY}/${repo}@${digest}" --arg digest "$digest" --arg arch "$arch" \
@@ -447,11 +514,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           BUILT: ${{ steps.build.outputs.images }}
+          ROLLBACK_TAG: ${{ steps.rollback.outputs.tag }}
         run: |
           set -euo pipefail
           # Staging deploys are not releases: SENTRY_RELEASE is the commit.
           if test "$MODE" = "staging"; then
             version="sha-${SOURCE_SHA:0:12}"
+          elif test -n "$ROLLBACK_TAG"; then
+            # A rollback redeploys a prior release under its own tag.
+            version="$ROLLBACK_TAG"
           else
             # A re-run of the same commit keeps the tag it already has.
             version="$(gh api "repos/${SOURCE_REPOSITORY}/tags?per_page=100" | jq -r --arg sha "$GITHUB_SHA" \
@@ -472,7 +543,8 @@ jobs:
   release:
     name: Cut release
     needs: build
-    if: inputs.mode == 'release'
+    # A rollback cuts no tag: it redeploys a prior release.
+    if: inputs.mode == 'release' && inputs.digest == ''
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 15
     permissions:
@@ -512,6 +584,7 @@ jobs:
       id-token: write
     env:
       MODE: ${{ inputs.mode }}
+      KIND: ${{ inputs.digest != '' && 'rollback' || inputs.mode }}
       APP: ${{ inputs.app }}
       CLUSTER: ${{ inputs.cluster }}
       DEPLOY_ENV: ${{ inputs.mode == 'release' && 'prod' || 'staging' }}
@@ -546,9 +619,10 @@ jobs:
 
       # A release promotes what staging already runs. If staging is on another
       # digest (a newer merge, a failed staging deploy), stop: the scan ran on
-      # an image nobody has exercised.
+      # an image nobody has exercised. A rollback skips this: its image already
+      # served prod as a prior release, and staging runs something newer.
       - name: Require staging to run this exact image
-        if: env.MODE == 'release' && inputs.has-staging
+        if: env.MODE == 'release' && inputs.has-staging && inputs.digest == ''
         shell: bash
         run: |
           set -euo pipefail
@@ -825,7 +899,7 @@ jobs:
           if test -z "${POSTHOG_PROJECT_ID:-}" || test -z "${POSTHOG_ANNOTATION_KEY:-}"; then
             echo "PostHog annotation skipped (POSTHOG_PROJECT_ID or POSTHOG_ANNOTATION_KEY not set)."; exit 0
           fi
-          body="$(jq -nc --arg app "$APP" --arg version "$VERSION" --arg sha "$GITHUB_SHA" --arg mode "$MODE" --arg run "$RUN_URL" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          body="$(jq -nc --arg app "$APP" --arg version "$VERSION" --arg sha "$GITHUB_SHA" --arg mode "$KIND" --arg run "$RUN_URL" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             '{content: ((if $mode == "rollback" then "Rollback " else "Deploy " end) + $app + " " + $version + " to prod (" + $sha[0:12] + ") " + $run), date_marker: $at, scope: "project"}')"
           code="$(curl -sS -o "$RUNNER_TEMP/posthog-annotation.json" -w '%{http_code}' -X POST \
             -H "Authorization: Bearer ${POSTHOG_ANNOTATION_KEY}" -H 'Content-Type: application/json' \
@@ -840,7 +914,7 @@ jobs:
           DEPLOY: ${{ steps.register.outputs.deploy }}
         run: |
           {
-            echo "### Deploy ${DEPLOY_ENV}"
+            echo "### Deploy ${DEPLOY_ENV}$(test "$KIND" = rollback && echo ' (rollback)')"
             echo
             echo "- Version: \`${VERSION}\` (\`${GITHUB_SHA}\`)"
             jq -r '.[] | "- Image: `\(.repo)@\(.digest)` (linux/\(.arch // "unknown"))"' <<<"$IMAGES"

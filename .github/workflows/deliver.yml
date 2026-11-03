@@ -961,14 +961,38 @@ jobs:
           APP: ${{ inputs.app }}
         run: |
           set -euo pipefail
+          # BEGIN alert-post
           if test -z "$ALERT_URL"; then
             echo "::notice::No incident_io_url secret passed. Not alerting."; exit 0
           fi
           echo "::add-mask::$ALERT_URL"
+          # The URL's token and source id are secret on their own, and an error
+          # response could echo them, so they are masked and scrubbed as well.
+          url_path="${ALERT_URL%%\?*}"
+          url_secrets=("$ALERT_URL" "${url_path##*/}")
+          case "$ALERT_URL" in
+            *\?*)
+              IFS='&' read -ra url_params <<<"${ALERT_URL#*\?}"
+              for param in "${url_params[@]}"; do url_secrets+=("${param#*=}"); done ;;
+          esac
+          for part in "${url_secrets[@]}"; do
+            if test "${#part}" -ge 8; then echo "::add-mask::$part"; fi
+          done
           payload="$(jq -nc --arg app "$APP" --arg mode "$MODE" --arg repo "$REPO" --arg sha "$GITHUB_SHA" --arg job "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             '{title: "Delivery failed: \($app) (\($mode))",
               description: "\($repo) @ \($sha[0:12]) failed to deliver (\($mode)). Run: \($job)",
               deduplication_key: "deliver-\($repo)-\($mode)-\($sha)",
               status: "firing"}')"
-          code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 -X POST -H 'Content-Type: application/json' -d "$payload" "$ALERT_URL" 2>/dev/null || true)"
-          case "$code" in 2??) echo "Alert sent." ;; *) echo "::warning::incident.io alert returned HTTP ${code:-none}." ;; esac
+          response="$(mktemp)"
+          code="$(curl -sS -o "$response" -w '%{http_code}' --max-time 20 -X POST -H 'Content-Type: application/json' -d "$payload" "$ALERT_URL" 2>/dev/null || true)"
+          case "$code" in 2??) echo "Alert sent."; exit 0 ;; esac
+          # One line with no control characters, so it cannot start a workflow command.
+          body="$(tr '[:cntrl:]' ' ' <"$response")"
+          for part in "${url_secrets[@]}"; do
+            if test "${#part}" -ge 8; then body="${body//"$part"/[redacted]}"; fi
+          done
+          # This job runs only after another job failed, and nothing needs it, so
+          # failing here cannot change the run's result. It makes the lost alert visible.
+          echo "::error::incident.io did not record the alert: HTTP ${code:-none}. Response: ${body:0:1000}"
+          exit 1
+          # END alert-post

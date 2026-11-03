@@ -110,6 +110,15 @@ on:
         description: 'Pass the POSTHOG_PROJECT_ID Depot CI variable (optional). With the POSTHOG_ANNOTATION_KEY secret, a prod deploy posts a PostHog annotation.'
         type: string
         default: ""
+      draft-release:
+        description: >-
+          true cuts the release tag through the git refs API, then creates the
+          GitHub Release as a DRAFT. Use it when the repository has immutable
+          releases and attaches assets after the release is cut (for example,
+          binaries built on the tag push). The caller's asset workflow publishes
+          the draft when its uploads are done. false (default) publishes at once.
+        type: boolean
+        default: false
     secrets:
       incident_io_url:
         description: 'Optional. The INCIDENT_IO_CI_ALERT_URL Depot CI secret (incident.io "CI" HTTP alert source URL incl. token). A failed delivery posts a non-paging alert to it.'
@@ -460,22 +469,34 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       VERSION: ${{ needs.build.outputs.version }}
       IMAGES: ${{ needs.build.outputs.images }}
+      DRAFT: ${{ inputs.draft-release }}
     steps:
       - name: Cut the release (tag and GitHub Release)
         shell: bash
         run: |
           set -euo pipefail
+          tagged=false
           if gh api "repos/${GITHUB_REPOSITORY}/commits/${VERSION}" --jq .sha >"$RUNNER_TEMP/tagged" 2>/dev/null; then
             test "$(cat "$RUNNER_TEMP/tagged")" = "$GITHUB_SHA" \
               || { echo "::error::Tag ${VERSION} points at $(cat "$RUNNER_TEMP/tagged"), not ${GITHUB_SHA}."; exit 1; }
             echo "Tag ${VERSION} already points at ${GITHUB_SHA}."
+            tagged=true
+          fi
+          # A draft release creates no tag, so draft mode pushes the tag first. That
+          # also keeps the next vYYYY.MM.DD.N counting (the version step reads tags).
+          if test "$DRAFT" = "true" && test "$tagged" = "false"; then
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/${VERSION}" -f sha="$GITHUB_SHA" >/dev/null
+            echo "Tagged ${VERSION} at ${GITHUB_SHA}."
           fi
           if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release ${VERSION} already exists."
           else
             notes="$(jq -r '"Images (linux/\(.[0].arch // "amd64")), deployed by digest:\n" + ([.[] | "- `\(.repo)@\(.digest)`"] | join("\n"))' <<<"$IMAGES")"
+            draft=()
+            if test "$DRAFT" = "true"; then draft=(--draft --verify-tag); fi
             gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$VERSION" \
-              --generate-notes --notes "$notes"
+              --generate-notes --notes "$notes" "${draft[@]}"
+            if test "$DRAFT" = "true"; then echo "Draft release ${VERSION} created; the caller's asset workflow publishes it."; fi
           fi
 
   deploy:

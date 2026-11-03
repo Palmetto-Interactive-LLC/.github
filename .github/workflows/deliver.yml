@@ -381,10 +381,24 @@ jobs:
               # No attestations: one platform gives one plain image manifest, two
               # give an index holding only the two platform manifests. The digest
               # promoted to prod is that manifest or index.
-              depot build --project "$DEPOT_PROJECT_ID" --platform "$PLATFORMS" --provenance=false --sbom=false \
-                --label "org.opencontainers.image.revision=${SOURCE_SHA}" \
-                --label "org.opencontainers.image.source=https://github.com/${SOURCE_REPOSITORY}" \
-                --file "$dockerfile" --tag "$uri" --push "$context"
+              # Depot's OIDC sign-in sometimes fails with "missing API token" before the
+              # build starts. Retry that once; any other failure stops here.
+              build_log="$(mktemp)"
+              for attempt in 1 2; do
+                if depot build --project "$DEPOT_PROJECT_ID" --platform "$PLATFORMS" --provenance=false --sbom=false \
+                  --label "org.opencontainers.image.revision=${SOURCE_SHA}" \
+                  --label "org.opencontainers.image.source=https://github.com/${SOURCE_REPOSITORY}" \
+                  --file "$dockerfile" --tag "$uri" --push "$context" 2>&1 | tee "$build_log"; then
+                  break
+                fi
+                if test "$attempt" = 1 && grep -q 'missing API token' "$build_log"; then
+                  echo "::warning::Depot sign-in failed with 'missing API token'; retrying once."
+                  sleep 15
+                  continue
+                fi
+                exit 1
+              done
+              rm -f "$build_log"
               echo "::endgroup::"
             else
               cat "$err"; echo "::error::Could not check ECR for ${repo}:${SOURCE_SHA}."; exit 1

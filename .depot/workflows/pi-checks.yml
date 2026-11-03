@@ -3,6 +3,8 @@
 #
 # Callers (in .depot/workflows) pin this file by full SHA:
 #   uses: Palmetto-Interactive-LLC/.github/.depot/workflows/pi-checks.yml@<sha>
+# A reusable workflow cannot add triggers. To check the merge queue ref too, the
+# caller lists `merge_group:` next to `pull_request:` in its own `on:`.
 # Every job runs on Depot's x86_64 sandboxes (depot-ubuntu-24.04). Depot CI
 # serves actions/cache from Depot Cache. The tool installers below pick the right
 # binary for arm64 or x86_64.
@@ -151,6 +153,42 @@ jobs:
             echo "Docs-only change: nothing to run."
           fi
           if grep -qE '^[.](github|depot)/(workflows|actions)/' <<<"$files"; then echo "workflows=true" >> "$GITHUB_OUTPUT"; else echo "workflows=false" >> "$GITHUB_OUTPUT"; fi
+
+  # Conventional Commits title. The squash-merge title becomes the commit on
+  # main, so it is checked on the pull request and again on the merge queue ref.
+  # No third-party action: the title reaches the shell through env: only. Events
+  # with neither a pull request nor a merge group (a push to main) pass.
+  # Needs no checkout and ignores docs_only: a docs PR still gets a title.
+  title:
+    name: title
+    if: inputs.mode == 'pr'
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    env:
+      PR_TITLE: ${{ github.event.pull_request.title }}
+      MERGE_MESSAGE: ${{ github.event.merge_group.head_commit.message }}
+    steps:
+      - name: Check the title
+        shell: bash
+        run: |
+          set -euo pipefail
+          # BEGIN pr-title
+          title="${PR_TITLE:-}"
+          if test -z "$title"; then title="${MERGE_MESSAGE:-}"; title="${title%%$'\n'*}"; fi
+          if test -z "$title"; then
+            echo "No pull request or merge queue title on this event. Nothing to check."
+            exit 0
+          fi
+          re='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([A-Za-z0-9._/,-]+\))?!?: [^ ].*$'
+          if [[ "$title" =~ $re ]] || [[ "$title" == 'Revert "'* ]]; then
+            echo "Title follows Conventional Commits."
+          else
+            echo "::error title=Title::The title must look like 'type(scope): subject'. Types: feat fix docs style refactor perf test build ci chore revert. Scope is optional; '!' marks a breaking change."
+            printf 'Got: %s\n' "$title"
+            exit 1
+          fi
+          # END pr-title
 
   quick:
     name: quick
@@ -587,7 +625,7 @@ jobs:
   pi-checks:
     name: pi-checks
     if: always()
-    needs: [changes, quick, secrets, deps, actions]
+    needs: [changes, title, quick, secrets, deps, actions]
     runs-on: depot-ubuntu-24.04
     timeout-minutes: 5
     permissions: {}

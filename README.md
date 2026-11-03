@@ -17,7 +17,7 @@ A failed default-branch delivery or release posts a non-paging alert to incident
 
 | Workflow | Purpose |
 |---|---|
-| `.depot/workflows/pi-checks.yml` | Checks. `mode: pr` (default) is light; `mode: release` is the heavy gate set. Jobs `changes`, `quick`, `secrets`, `deps`, `actions`, and the aggregate `pi-checks`. |
+| `.depot/workflows/pi-checks.yml` | Checks. `mode: pr` (default) is light; `mode: release` is the heavy gate set. Jobs `changes`, `title`, `quick`, `secrets`, `deps`, `actions`, and the aggregate `pi-checks`. `title` (PR mode) requires a Conventional Commits PR title (`feat(scope): subject`); on a merge queue run it checks the queue commit's first line. A caller that wants the merge queue checked lists `merge_group:` in its own `on:`. |
 | `.depot/workflows/deliver.yml` | The ECS engine. `mode: staging` (default) builds and deploys staging; `mode: release` promotes to prod. |
 | `.depot/workflows/pi-release.yml` | Create Release: heavy gates (`pi-checks`), then `deliver.yml` in release mode. `deploy: false` runs the gates and cuts a tag only. |
 | `.github/workflows/deliver.yml` | GitHub Actions copy of the ECS engine for repos moving off Depot CI (membl pilot, PAL-1022). Same modes and inputs, plus `runs-on` (default `membl`) and `environment`. AWS auth is GitHub OIDC; the deploy job runs in a GitHub environment. The Depot copy stays for repos still on Depot CI. Call it with `uses: Palmetto-Interactive-LLC/.github/.github/workflows/deliver.yml@<40-char sha>`. |

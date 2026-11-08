@@ -701,8 +701,18 @@ jobs:
           fi
           # END awsvpc-network
 
-          run="$(aws ecs run-task --cluster "$CLUSTER" --task-definition "$arn" --count 1 \
-            --started-by "deliver-${GITHUB_RUN_ID}" --overrides "$overrides" "${placement[@]}" ${network[@]+"${network[@]}"} --output json)"
+          # Tag the task with the deploy role's name. A tag-scoped deploy role (ecs-deploy-role module)
+          # allows RunTask only with pi:deploy-role=<role name>; a role still on the older policy has no
+          # ecs:TagResource, so an AccessDenied on the tagged call retries untagged.
+          role_name="$(aws sts get-caller-identity --query Arn --output text | sed -E 's#^arn:aws:sts::[0-9]+:assumed-role/([^/]+)/.*#\1#')"
+          run_args=(--cluster "$CLUSTER" --task-definition "$arn" --count 1 --started-by "deliver-${GITHUB_RUN_ID}" \
+            --overrides "$overrides" "${placement[@]}" ${network[@]+"${network[@]}"} --output json)
+          run_err="$(mktemp)"
+          if ! run="$(aws ecs run-task "${run_args[@]}" --tags "key=pi:deploy-role,value=${role_name}" 2>"$run_err")"; then
+            grep -q AccessDenied "$run_err" || { cat "$run_err" >&2; exit 1; }
+            echo "Tagged RunTask was denied (deploy role predates tag-scoped migrations); running untagged."
+            run="$(aws ecs run-task "${run_args[@]}")"
+          fi
           task="$(jq -r '.tasks[0].taskArn // empty' <<<"$run")"
           test -n "$task" || { echo "::error::Migration task did not start: $(jq -c '.failures' <<<"$run")"; exit 1; }
           echo "Migration task started: ${task##*/}"

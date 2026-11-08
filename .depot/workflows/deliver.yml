@@ -693,8 +693,10 @@ jobs:
           if test "$(jq -r '.networkMode // "bridge"' "$workdir/${family}.json")" = "awsvpc"; then
             netcfg="$(aws ecs describe-services --cluster "$CLUSTER" --services "$family" \
               --query 'services[0].networkConfiguration' --output json)"
-            test -n "$netcfg" && test "$netcfg" != "null" \
-              || { echo "::error::${family} is awsvpc but its service has no networkConfiguration to run the migration with."; exit 1; }
+            if test -z "$netcfg" || test "$netcfg" = "null"; then
+              echo "::error::${family} is awsvpc but its service has no networkConfiguration to run the migration with."
+              exit 1
+            fi
             network=(--network-configuration "$netcfg")
           fi
           # END awsvpc-network

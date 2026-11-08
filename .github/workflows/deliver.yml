@@ -820,9 +820,24 @@ jobs:
           else
             placement=(--launch-type EC2)
           fi
+          # BEGIN awsvpc-network
+          # An awsvpc revision (ECS Managed Instances, PAL-1281) needs the service's own
+          # subnets and security groups; a bridge revision takes none. Tested by
+          # scripts/tests/pi-deliver-awsvpc-network.sh.
+          network=()
+          if test "$(jq -r '.networkMode // "bridge"' "$workdir/${family}.json")" = "awsvpc"; then
+            netcfg="$(aws ecs describe-services --cluster "$CLUSTER" --services "$family" \
+              --query 'services[0].networkConfiguration' --output json)"
+            if test -z "$netcfg" || test "$netcfg" = "null"; then
+              echo "::error::${family} is awsvpc but its service has no networkConfiguration to run the migration with."
+              exit 1
+            fi
+            network=(--network-configuration "$netcfg")
+          fi
+          # END awsvpc-network
 
           run="$(aws ecs run-task --cluster "$CLUSTER" --task-definition "$arn" --count 1 \
-            --started-by "deliver-${GITHUB_RUN_ID}" --overrides "$overrides" "${placement[@]}" --output json)"
+            --started-by "deliver-${GITHUB_RUN_ID}" --overrides "$overrides" "${placement[@]}" ${network[@]+"${network[@]}"} --output json)"
           task="$(jq -r '.tasks[0].taskArn // empty' <<<"$run")"
           test -n "$task" || { echo "::error::Migration task did not start: $(jq -c '.failures' <<<"$run")"; exit 1; }
           echo "Migration task started: ${task##*/}"

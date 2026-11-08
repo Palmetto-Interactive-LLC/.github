@@ -188,6 +188,11 @@ jobs:
     outputs:
       stale: ${{ steps.head.outputs.stale }}
     steps:
+      # Membl Meleys runner guests lacked /dev/fd until membl-runner #373's host image is live, and this
+      # workflow uses bash process substitution. A no-op wherever /dev/fd already exists.
+      - name: Ensure /dev/fd
+        shell: bash
+        run: '[ -e /dev/fd ] || sudo ln -s /proc/self/fd /dev/fd || true'
       - name: Check the delivery mode
         shell: bash
         env:
@@ -258,6 +263,11 @@ jobs:
       DIGEST: ${{ inputs.digest }}
       SERVICES_INPUT: ${{ inputs.services }}
     steps:
+      # Membl Meleys runner guests lacked /dev/fd until membl-runner #373's host image is live, and this
+      # workflow uses bash process substitution. A no-op wherever /dev/fd already exists.
+      - name: Ensure /dev/fd
+        shell: bash
+        run: '[ -e /dev/fd ] || sudo ln -s /proc/self/fd /dev/fd || true'
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -585,6 +595,11 @@ jobs:
       APP: ${{ inputs.app }}
       SERVICES_INPUT: ${{ inputs.services }}
     steps:
+      # Membl Meleys runner guests lacked /dev/fd until membl-runner #373's host image is live, and this
+      # workflow uses bash process substitution. A no-op wherever /dev/fd already exists.
+      - name: Ensure /dev/fd
+        shell: bash
+        run: '[ -e /dev/fd ] || sudo ln -s /proc/self/fd /dev/fd || true'
       - name: Cut the release (tag and GitHub Release)
         shell: bash
         run: |
@@ -634,6 +649,11 @@ jobs:
       # secret guard fails a revision with any other secret.
       SERVING_SECRETS: ${{ inputs.serving-secrets }}
     steps:
+      # Membl Meleys runner guests lacked /dev/fd until membl-runner #373's host image is live, and this
+      # workflow uses bash process substitution. A no-op wherever /dev/fd already exists.
+      - name: Ensure /dev/fd
+        shell: bash
+        run: '[ -e /dev/fd ] || sudo ln -s /proc/self/fd /dev/fd || true'
       # The environment-scoped ECS_DEPLOY_ROLE_ARN (pi-platform split deploy roles:
       # one role per environment, trusting only environment:<name>) wins over the
       # input, which the caller resolves at repository level.
@@ -981,6 +1001,11 @@ jobs:
     timeout-minutes: 5
     permissions: {}
     steps:
+      # Membl Meleys runner guests lacked /dev/fd until membl-runner #373's host image is live, and this
+      # workflow uses bash process substitution. A no-op wherever /dev/fd already exists.
+      - name: Ensure /dev/fd
+        shell: bash
+        run: '[ -e /dev/fd ] || sudo ln -s /proc/self/fd /dev/fd || true'
       - name: Post to incident.io
         shell: bash
         env:

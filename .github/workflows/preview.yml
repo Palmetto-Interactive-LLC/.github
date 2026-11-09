@@ -154,7 +154,7 @@ jobs:
           # Caller inputs.
           [[ "$APP" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || bad "app isn't a project name."
           [[ "$SERVICE" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || bad "service isn't a service name."
-          [[ "$PREVIEW_DOMAIN" =~ ^[a-z0-9-]+(\.[a-z0-9-]+)+$ ]] || bad "preview-domain isn't a domain."
+          [[ "$PREVIEW_DOMAIN" =~ ^([a-z0-9-]+\.)*palmettointeractive\.com$ ]] || bad "preview-domain must be under palmettointeractive.com (pi-platform previews.domain)."
           [[ "$PLATFORMS" =~ ^linux/(amd64|arm64)(,linux/(amd64|arm64))?$ ]] || bad "platforms must be linux/amd64, linux/arm64 or both."
           jq -e 'type == "array" and all(.[]; type == "string" and test("^[A-Z][A-Z0-9_]*$"))' <<<"$SECRET_KEYS" >/dev/null \
             || bad "secret-keys must be a JSON list of environment variable names."

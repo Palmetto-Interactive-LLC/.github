@@ -137,7 +137,9 @@ Put the full suite in `test-command` and any IaC, policy, cost or integration ga
 
 
 The Depot reusable delivery workflow also accepts optional `staging-seed-script`
-and `staging-seed-role-arn` inputs, both empty by default. With staging already
+and `staging-seed-role-arn` inputs, both empty by default. The optional empty
+`staging-seed-config` input carries only metadata JSON validated by the reviewed
+caller; credentials and tokens are forbidden in it. With staging already
 enabled, a reviewed local shell script can run under the existing complete
 repository delivery concurrency group, after immutable images are built and
 before ECS registration or rollout. It requires current protected main, assumes

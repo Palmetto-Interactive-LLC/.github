@@ -69,7 +69,7 @@ import yaml
 p=Path(sys.argv[1]); source=p.read_text(); wf=yaml.load(source, Loader=yaml.BaseLoader)
 assert wf['permissions'] == {}
 assert wf['concurrency'] == {'group':'deliver-${{ github.repository }}','cancel-in-progress':'false'}
-for name in ['staging-seed-script','staging-seed-role-arn']:
+for name in ['staging-seed-script','staging-seed-role-arn','staging-seed-config']:
     assert wf['on']['workflow_call']['inputs'][name]['default'] == ''
 steps=wf['jobs']['deploy']['steps']
 seed=[s for s in steps if s['name'] in ['Checkout the reviewed staging seed caller','Configure AWS credentials through Depot OIDC (staging seed)','Run the reviewed staging seed caller']]
@@ -88,13 +88,14 @@ for job in wf['jobs'].values():
         injected = {k for k in step.get('env',{}) if k.startswith('MEMBL_STAGING_')}
         if injected:
             assert step['name']=='Run the reviewed staging seed caller'
-            assert injected=={'MEMBL_STAGING_NEON_API_KEY','MEMBL_STAGING_TEMPORAL_API_KEY','MEMBL_STAGING_TEMPORAL_CODEC_KEYRING'}
+            assert injected=={'MEMBL_STAGING_SEED_CONFIG','MEMBL_STAGING_NEON_API_KEY','MEMBL_STAGING_TEMPORAL_API_KEY','MEMBL_STAGING_TEMPORAL_CODEC_KEYRING'}
+assert seed[-1]['env']['MEMBL_STAGING_SEED_CONFIG']=='${{ inputs.staging-seed-config }}'
 # Remove only the explicitly gated additions: every prior parsed source byte
 # (including shell bodies) must then equal current protected main exactly.
 import copy, subprocess
 baseline=yaml.load(subprocess.check_output(['git','show','origin/main:.depot/workflows/deliver.yml'],text=True),Loader=yaml.BaseLoader)
 prior=copy.deepcopy(wf)
-for name in ['staging-seed-script','staging-seed-role-arn']:
+for name in ['staging-seed-script','staging-seed-role-arn','staging-seed-config']:
     del prior['on']['workflow_call']['inputs'][name]
 for name in secret_names:
     del prior['on']['workflow_call']['secrets'][name]

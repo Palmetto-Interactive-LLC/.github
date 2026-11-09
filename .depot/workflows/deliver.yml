@@ -90,6 +90,10 @@ on:
         description: 'Optional reviewed caller-relative shell script. Runs only before a staging deploy under the existing whole-delivery concurrency lease; empty preserves existing behavior.'
         type: string
         default: ""
+      staging-seed-config:
+        description: 'Optional nonsecret metadata JSON for the reviewed caller schema; never put credentials or tokens here.'
+        type: string
+        default: ""
       staging-seed-role-arn:
         description: 'Dedicated least-privilege OIDC seed role. Required only with staging-seed-script; the normal deploy role is restored before task registration.'
         type: string
@@ -564,6 +568,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           STAGING_SEED_SCRIPT: ${{ inputs.staging-seed-script }}
           STAGING_SEED_ROLE: ${{ inputs.staging-seed-role-arn }}
+          MEMBL_STAGING_SEED_CONFIG: ${{ inputs.staging-seed-config }}
           MEMBL_STAGING_NEON_API_KEY: ${{ secrets.staging_neon_api_key }}
           MEMBL_STAGING_TEMPORAL_API_KEY: ${{ secrets.staging_temporal_api_key }}
           MEMBL_STAGING_TEMPORAL_CODEC_KEYRING: ${{ secrets.staging_temporal_codec_keyring }}

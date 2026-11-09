@@ -213,8 +213,9 @@ jobs:
           if test -n "$DIGEST" && test "$MODE" != "release"; then
             echo "::error::digest (a rollback) is for mode=release only."; exit 1
           fi
-          if test "$MODE" = "staging" && test -n "$STAGING_URL" && ! [[ "$STAGING_URL" =~ ^https://[A-Za-z0-9.-]+(/[^[:space:]]*)?$ ]]; then
-            echo "::error::staging-url must be a full https:// URL (got '${STAGING_URL}')."; exit 1
+          # The org's own domains only (pi-platform hostnames.staging).
+          if test "$MODE" = "staging" && test -n "$STAGING_URL" && ! [[ "$STAGING_URL" =~ ^https://([a-z0-9-]+\.)+(palmettointeractive\.com|membl\.io|odonofrio\.com|carolinahunterhd\.com|oswaldcooke\.com)(/[^[:space:]]*)?$ ]]; then
+            echo "::error::staging-url must be https:// on an org domain (palmettointeractive.com, membl.io, odonofrio.com, carolinahunterhd.com, oswaldcooke.com); got '${STAGING_URL}'."; exit 1
           fi
           case "$MODE" in
             staging) ;;

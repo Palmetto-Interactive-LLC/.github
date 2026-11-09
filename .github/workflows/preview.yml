@@ -347,8 +347,9 @@ jobs:
           ARN: ${{ steps.slot.outputs.arn }}
         run: |
           set -euo pipefail
-          aws ecs tag-resource --resource-arn "$ARN" --tags "key=membl:lease-expires,value=${LEASE_EXPIRES}"
-          echo "Lease tag: ${LEASE_EXPIRES}"
+          aws ecs tag-resource --resource-arn "$ARN" \
+            --tags "key=membl:lease-expires,value=${LEASE_EXPIRES}" "key=membl:pr,value=${PR}"
+          echo "Lease tag: ${LEASE_EXPIRES}, PR #${PR}"
 
       - name: Record a GitHub Deployment
         id: deployment
@@ -440,13 +441,23 @@ jobs:
           gh api "repos/${GITHUB_REPOSITORY}/deployments/${ID}/statuses" -f state="$state" \
             -f environment_url="$URL" -F auto_inactive=true -q .state
 
+      # Only stop the slot if this PR still holds it. A late or replayed down for an
+      # old PR must not stop a slot that now serves a newer one. An untagged slot
+      # (before membl:pr existed) is stopped as before.
       - name: Scale to zero
         if: env.MODE == 'down'
         shell: bash
         env:
           SERVICE: ${{ steps.slot.outputs.service }}
+          ARN: ${{ steps.slot.outputs.arn }}
         run: |
           set -euo pipefail
+          holder="$(aws ecs list-tags-for-resource --resource-arn "$ARN" \
+            --query "tags[?key=='membl:pr'].value | [0]" --output text)"
+          if test -n "$holder" && test "$holder" != "None" && test "$holder" != "$PR"; then
+            echo "::notice::Slot ${SLOT} now serves PR #${holder}, not #${PR}. Leaving it running."
+            exit 0
+          fi
           aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" --desired-count 0 \
             --query 'service.desiredCount' --output text
 

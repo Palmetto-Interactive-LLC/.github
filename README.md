@@ -134,3 +134,17 @@ The caller workflow is named exactly **Create Release** and has one trigger, `wo
 Outputs: `release_url`, `release_tag`, `app_url`, `image_digest`, `run_url`.
 
 Put the full suite in `test-command` and any IaC, policy, cost or integration gate in `release-gate-command`. Keep `quick-test-command` to seconds.
+
+
+The Depot reusable delivery workflow also accepts optional `staging-seed-script`
+and `staging-seed-role-arn` inputs, both empty by default. With staging already
+enabled, a reviewed local shell script can run under the existing complete
+repository delivery concurrency group, after immutable images are built and
+before ECS registration or rollout. It requires current protected main, assumes
+a separate seed role, and switches back to the deployment role afterward.
+Optional `staging_neon_api_key`, `staging_temporal_api_key` and
+`staging_temporal_codec_keyring` secrets are injected only into that step.
+The hook grants no staging activation and does not change default or production
+callers. Its script must implement the bounded seed/rollback contract; any
+failure stops delivery. Timeout sends INT, with a bounded final kill window;
+uncatchable termination still requires owner reconciliation.

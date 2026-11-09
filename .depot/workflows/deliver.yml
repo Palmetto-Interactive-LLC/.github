@@ -86,6 +86,18 @@ on:
         description: 'Pass the ECS_DEPLOY_ROLE_ARN Depot CI variable. OIDC role that registers task definitions and updates services.'
         type: string
         default: ""
+      staging-seed-script:
+        description: 'Optional reviewed caller-relative shell script. Runs only before a staging deploy under the existing whole-delivery concurrency lease; empty preserves existing behavior.'
+        type: string
+        default: ""
+      staging-seed-config:
+        description: 'Optional nonsecret metadata JSON for the reviewed caller schema; never put credentials or tokens here.'
+        type: string
+        default: ""
+      staging-seed-role-arn:
+        description: 'Dedicated least-privilege OIDC seed role. Required only with staging-seed-script; the normal deploy role is restored before task registration.'
+        type: string
+        default: ""
       serving-secrets:
         description: 'Pass the ECS_SERVING_SECRETS Depot CI variable. JSON {"<service>-<env>": ["SECRET_NAME", ...]} the serving revision may hold.'
         type: string
@@ -111,6 +123,15 @@ on:
         type: string
         default: ""
     secrets:
+      staging_neon_api_key:
+        description: 'Optional existing project-management credential, exposed only to an opted-in staging seed step.'
+        required: false
+      staging_temporal_api_key:
+        description: 'Optional staging-only Temporal service identity, never a production fallback.'
+        required: false
+      staging_temporal_codec_keyring:
+        description: 'Optional KMS-wrapped staging-only codec keyring.'
+        required: false
       incident_io_url:
         description: 'Optional. The INCIDENT_IO_CI_ALERT_URL Depot CI secret (incident.io "CI" HTTP alert source URL incl. token). A failed delivery posts a non-paging alert to it.'
         required: false
@@ -158,8 +179,18 @@ jobs:
         shell: bash
         env:
           MODE: ${{ inputs.mode }}
+          STAGING_SEED_SCRIPT: ${{ inputs.staging-seed-script }}
+          STAGING_SEED_ROLE: ${{ inputs.staging-seed-role-arn }}
+          HAS_STAGING: ${{ inputs.has-staging }}
         run: |
           set -euo pipefail
+          # BEGIN staging-seed-guard
+          if test "$MODE" = "staging" && test -n "$STAGING_SEED_SCRIPT"; then
+            if test "$HAS_STAGING" != "true" || test -z "$STAGING_SEED_ROLE"; then
+              echo "::error::A staging seed hook needs staging enabled and a dedicated seed role."; exit 1
+            fi
+          fi
+          # END staging-seed-guard
           case "$MODE" in
             staging) ;;
             release)
@@ -511,12 +542,80 @@ jobs:
         run: |
           test -n "$AWS_ROLE_ARN" || { echo "::error::Pass deploy-role-arn (the ECS_DEPLOY_ROLE_ARN Depot CI variable)."; exit 1; }
 
+      # Optional staging-only preparation. This job is inside the existing
+      # deliver-${repo} lease, held through build, seed, rollout and readback.
+      # With an empty script, all three new steps are skipped and no role changes.
+      - name: Checkout the reviewed staging seed caller
+        if: env.MODE == 'staging' && inputs.staging-seed-script != ''
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Configure AWS credentials through Depot OIDC (staging seed)
+        if: env.MODE == 'staging' && inputs.staging-seed-script != ''
+        uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: staging-seed-${{ github.run_id }}
+          role-to-assume: ${{ inputs.staging-seed-role-arn }}
+          unset-current-credentials: true
+
+      - name: Run the reviewed staging seed caller
+        if: env.MODE == 'staging' && inputs.staging-seed-script != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAGING_SEED_SCRIPT: ${{ inputs.staging-seed-script }}
+          STAGING_SEED_ROLE: ${{ inputs.staging-seed-role-arn }}
+          MEMBL_STAGING_SEED_CONFIG: ${{ inputs.staging-seed-config }}
+          MEMBL_STAGING_NEON_API_KEY: ${{ secrets.staging_neon_api_key }}
+          MEMBL_STAGING_TEMPORAL_API_KEY: ${{ secrets.staging_temporal_api_key }}
+          MEMBL_STAGING_TEMPORAL_CODEC_KEYRING: ${{ secrets.staging_temporal_codec_keyring }}
+        run: |
+          set -euo pipefail
+          # BEGIN staging-seed
+          if test "$MODE" != "staging" || test "$DEPLOY_ENV" != "staging"; then
+            echo "::error::A seed hook is staging-only."; exit 1
+          fi
+          if test "$GITHUB_REF" != "refs/heads/main" || ! [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Staging seeding requires protected main and an immutable source SHA."; exit 1
+          fi
+          test -n "$STAGING_SEED_ROLE" \
+            || { echo "::error::A dedicated staging seed role is required."; exit 1; }
+          # This is one reviewed local filename, never shell text or an external path.
+          [[ "$STAGING_SEED_SCRIPT" =~ ^[.]/[A-Za-z0-9_./-]+[.]sh$ ]] \
+            || { echo "::error::staging-seed-script must be a caller-relative shell file."; exit 1; }
+          case "/${STAGING_SEED_SCRIPT#./}/" in *"/../"*|*"/./"*) echo "::error::Invalid staging seed path."; exit 1 ;; esac
+          if test ! -f "$STAGING_SEED_SCRIPT" || test -L "$STAGING_SEED_SCRIPT"; then
+            echo "::error::The staging seed caller is missing or a symlink."; exit 1
+          fi
+          workspace="$(realpath "$GITHUB_WORKSPACE")"
+          script="$(realpath "$STAGING_SEED_SCRIPT")"
+          case "$script" in "$workspace"/*) ;; *) echo "::error::Seed caller escapes its checkout."; exit 1 ;; esac
+          # A long image build may have outlived its main head. Do not seed it.
+          head="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha 2>/dev/null)" \
+            || { echo "::error::Cannot verify current main before staging seed."; exit 1; }
+          test "$head" = "$GITHUB_SHA" \
+            || { echo "::error::Staging source is no longer current main."; exit 1; }
+          export MEMBL_STAGING_DELIVERY_LEASE="deliver-${GITHUB_REPOSITORY}"
+          export MEMBL_STAGING_DELIVERY_SOURCE_SHA="$GITHUB_SHA"
+          export MEMBL_STAGING_DELIVERY_RUN_ID="$GITHUB_RUN_ID"
+          export MEMBL_STAGING_DELIVERY_ATTEMPT="$GITHUB_RUN_ATTEMPT"
+          export MEMBL_STAGING_BUILT_IMAGES="$IMAGES"
+          export MEMBL_STAGING_CLUSTER="$CLUSTER"
+          export MEMBL_STAGING_APP="$APP"
+          # Allow the caller's bounded rollback to complete after an interrupt.
+          timeout --signal=INT --kill-after=150s 1200s bash --noprofile --norc "$script"
+          # END staging-seed
+
       - name: Configure AWS credentials through Depot OIDC (ECS deploy)
         uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
         with:
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: deliver-${{ inputs.mode }}-${{ github.run_id }}
           role-to-assume: ${{ inputs.deploy-role-arn }}
+          unset-current-credentials: ${{ inputs.mode == 'staging' && inputs.staging-seed-script != '' }}
 
       # A release promotes what staging already runs. If staging is on another
       # digest (a newer merge, a failed staging deploy), stop: the scan ran on

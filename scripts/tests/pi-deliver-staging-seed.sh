@@ -91,7 +91,7 @@ for job in wf['jobs'].values():
             assert injected=={'MEMBL_STAGING_SEED_CONFIG','MEMBL_STAGING_NEON_API_KEY','MEMBL_STAGING_TEMPORAL_API_KEY','MEMBL_STAGING_TEMPORAL_CODEC_KEYRING'}
 assert seed[-1]['env']['MEMBL_STAGING_SEED_CONFIG']=='${{ inputs.staging-seed-config }}'
 # Remove only the explicitly gated additions: every prior parsed source byte
-# (including shell bodies) must then equal current protected main exactly.
+# (including shell bodies) must then equal the pre-hook protected-main contract exactly.
 import copy, subprocess
 # Compare to the immutable pre-hook contract. origin/main contains this hook
 # after merge, so a mutable baseline would make main reject its own additions.

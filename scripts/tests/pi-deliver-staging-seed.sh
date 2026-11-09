@@ -91,9 +91,12 @@ for job in wf['jobs'].values():
             assert injected=={'MEMBL_STAGING_SEED_CONFIG','MEMBL_STAGING_NEON_API_KEY','MEMBL_STAGING_TEMPORAL_API_KEY','MEMBL_STAGING_TEMPORAL_CODEC_KEYRING'}
 assert seed[-1]['env']['MEMBL_STAGING_SEED_CONFIG']=='${{ inputs.staging-seed-config }}'
 # Remove only the explicitly gated additions: every prior parsed source byte
-# (including shell bodies) must then equal current protected main exactly.
+# (including shell bodies) must then equal the pre-hook protected-main contract exactly.
 import copy, subprocess
-baseline=yaml.load(subprocess.check_output(['git','show','origin/main:.depot/workflows/deliver.yml'],text=True),Loader=yaml.BaseLoader)
+# Compare to the immutable pre-hook contract. origin/main contains this hook
+# after merge, so a mutable baseline would make main reject its own additions.
+baseline_ref='0ab85924b9912af8650d7761e269382d66d4c3dd'
+baseline=yaml.load(subprocess.check_output(['git','show',baseline_ref+':.depot/workflows/deliver.yml'],text=True),Loader=yaml.BaseLoader)
 prior=copy.deepcopy(wf)
 for name in ['staging-seed-script','staging-seed-role-arn','staging-seed-config']:
     del prior['on']['workflow_call']['inputs'][name]

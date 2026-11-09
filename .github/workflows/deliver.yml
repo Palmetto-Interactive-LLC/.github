@@ -7,6 +7,7 @@
 #   - The deploy job runs in a GitHub environment (the environment input, default
 #     staging, or production in release mode), so the OIDC subject is
 #     repo:<owner>/<repo>:environment:<name> and production can require a reviewer.
+#     A staging deploy shows the staging-url input as the environment URL.
 #   - depot build authenticates with Depot OIDC (trust relationship on the Depot
 #     project) or, as a fallback, the optional depot_token secret.
 #   - Repo variables are GitHub variables and resolve in the caller, which still
@@ -51,6 +52,14 @@ on:
         default: membl
       environment:
         description: GitHub environment for the deploy job. Empty means production in release mode and staging otherwise.
+        type: string
+        default: ""
+      staging-url:
+        description: >-
+          Optional. Full https:// URL of the app's staging hostname (pi-platform
+          hostnames.staging[0]). The staging deploy job shows it as the GitHub
+          staging environment URL. Empty shows no URL: the workflow knows no
+          hostnames. Release (prod) deploys never set a URL.
         type: string
         default: ""
       app:
@@ -198,10 +207,15 @@ jobs:
         env:
           MODE: ${{ inputs.mode }}
           DIGEST: ${{ inputs.digest }}
+          STAGING_URL: ${{ inputs.staging-url }}
         run: |
           set -euo pipefail
           if test -n "$DIGEST" && test "$MODE" != "release"; then
             echo "::error::digest (a rollback) is for mode=release only."; exit 1
+          fi
+          # The org's own domains only (pi-platform hostnames.staging).
+          if test "$MODE" = "staging" && test -n "$STAGING_URL" && ! [[ "$STAGING_URL" =~ ^https://([a-z0-9-]+\.)+(palmettointeractive\.com|membl\.io|odonofrio\.com|carolinahunterhd\.com|oswaldcooke\.com)(/[^[:space:]]*)?$ ]]; then
+            echo "::error::staging-url must be https:// on an org domain (palmettointeractive.com, membl.io, odonofrio.com, carolinahunterhd.com, oswaldcooke.com); got '${STAGING_URL}'."; exit 1
           fi
           case "$MODE" in
             staging) ;;
@@ -627,7 +641,10 @@ jobs:
     if: ${{ !cancelled() && needs.build.result == 'success' && (needs.release.result == 'success' || needs.release.result == 'skipped') && (inputs.has-staging || inputs.mode == 'release') }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 90
-    environment: ${{ inputs.environment != '' && inputs.environment || (inputs.mode == 'release' && 'production' || 'staging') }}
+    # The url is display only: the OIDC subject is environment:<name> either way.
+    environment:
+      name: ${{ inputs.environment != '' && inputs.environment || (inputs.mode == 'release' && 'production' || 'staging') }}
+      url: ${{ inputs.mode != 'release' && inputs.staging-url || '' }}
     permissions:
       contents: read
       id-token: write

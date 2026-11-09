@@ -20,7 +20,8 @@ A failed default-branch delivery or release posts a non-paging alert to incident
 | `.depot/workflows/pi-checks.yml` | Checks. `mode: pr` (default) is light; `mode: release` is the heavy gate set. Jobs `changes`, `title`, `quick`, `secrets`, `deps`, `actions`, and the aggregate `pi-checks`. `title` (PR mode) requires a Conventional Commits PR title (`feat(scope): subject`); on a merge queue run it checks the queue commit's first line. A caller that wants the merge queue checked lists `merge_group:` in its own `on:`. |
 | `.depot/workflows/deliver.yml` | The ECS engine. `mode: staging` (default) builds and deploys staging; `mode: release` promotes to prod. |
 | `.depot/workflows/pi-release.yml` | Create Release: heavy gates (`pi-checks`), then `deliver.yml` in release mode. `deploy: false` runs the gates and cuts a tag only. |
-| `.github/workflows/deliver.yml` | GitHub Actions copy of the ECS engine for repos moving off Depot CI (membl pilot, PAL-1022). Same modes and inputs, plus `runs-on` (default `membl`) and `environment`. AWS auth is GitHub OIDC; the deploy job runs in a GitHub environment. In release mode it also takes `digest`: a rollback to a digest listed in a published GitHub Release of the repository (any other digest is refused before AWS is touched; no build, no new tag, no staging check, the ECR scan gate still runs; only the services that release deployed, which its notes list (older releases deployed only `<app>`); tested by `scripts/tests/pi-deliver-rollback-target.sh`). The Depot copy stays for repos still on Depot CI. Call it with `uses: Palmetto-Interactive-LLC/.github/.github/workflows/deliver.yml@<40-char sha>`. |
+| `.github/workflows/deliver.yml` | GitHub Actions copy of the ECS engine for repos moving off Depot CI (membl pilot, PAL-1022). Same modes and inputs, plus `runs-on` (default `membl`), `environment` and `staging-url`. AWS auth is GitHub OIDC; the deploy job runs in a GitHub environment. A staging deploy shows `staging-url` (a full `https://` URL on an org domain: palmettointeractive.com, membl.io, odonofrio.com, carolinahunterhd.com or oswaldcooke.com; normally pi-platform's first `hostnames.staging`) as the `staging` environment URL; empty shows none, and a release never sets one. The URL doesn't change the OIDC subject (`environment:<name>`). The Depot copy gets no environment: its roles trust only the Depot subject for `refs/heads/main` (pi-platform `ecs-deploy-role`), and its header warns that `environment:` changes the subject. A repo moves to this copy and split deploy roles to get a staging URL. In release mode it also takes `digest`: a rollback to a digest listed in a published GitHub Release of the repository (any other digest is refused before AWS is touched; no build, no new tag, no staging check, the ECR scan gate still runs; only the services that release deployed, which its notes list (older releases deployed only `<app>`); tested by `scripts/tests/pi-deliver-rollback-target.sh`). The Depot copy stays for repos still on Depot CI. Call it with `uses: Palmetto-Interactive-LLC/.github/.github/workflows/deliver.yml@<40-char sha>`. |
+| `.github/workflows/preview.yml` | Preview slots (ADR 0017), generalized from pi-client-portal. Runs on the preview manager's `repository_dispatch` (`preview-up`, `preview-renew`, `preview-down`), builds the PR's commit, deploys slot `<app>-preview-<k>` with the preview role and records a GitHub Deployment in `preview-<PR number>` at `https://<app>-<k>.<preview-domain>/`. Up and renew tag the slot `membl:pr=<PR>`; `preview-down` scales the slot to 0 only if that tag still names its PR (or is missing), then marks that environment's Deployments inactive. Needs pi-platform #1621 (preview role may set `membl:pr` and read its slot tags). See [preview.yml](#previewyml). Deployments are named per PR (`preview-<PR>`); pi-client-portal's own workflow names them per slot (`preview-<k>`), so a repo uses one scheme or the other, never both. |
 
 Callers live in the app's `.depot/workflows/` and pin by full commit SHA:
 
@@ -45,6 +46,30 @@ uses: Palmetto-Interactive-LLC/.github/.depot/workflows/deliver.yml@<40-char sha
 - AWS auth is Depot's OIDC token (`identity.depot.dev`) through `aws-actions/configure-aws-credentials`. The IAM roles trust the Depot sub for the repo on `main`, set up in pi-platform (`github.depot_ci`).
 - Repo variables are Depot CI variables (`depot ci vars add NAME --value V --repo owner/repo`): `ECS_DEPLOY_ENABLED`, `PI_PLATFORM_IMAGE_PUSH_ROLE_ARN`, `ECS_DEPLOY_ROLE_ARN`, `ECS_SERVING_SECRETS`. They do not resolve inside the shared (external) workflow, so the caller passes them as inputs: `deploy-enabled: ${{ vars.ECS_DEPLOY_ENABLED }}`, `push-role-arn`, `deploy-role-arn`, `serving-secrets`. GitHub Actions variables are not visible to Depot.
 - The snippets under `scripts/tests/` run the marked blocks of this file against fakes.
+
+## preview.yml
+
+The preview manager in membl-runner core owns the slot lease. On a PR open or a new head it takes or renews a slot and dispatches `preview-up` (or `preview-renew`); on close it releases the lease and dispatches `preview-down`. The workflow never runs on `pull_request`: the preview role trusts only `environment:preview`, and pi-platform gives that environment a main-only branch policy, so a PR's own run can't get the role. `repository_dispatch` runs the caller from the default branch, so a PR can't change what deploys it.
+
+Inputs: `app` (required), `service` (ECR suffix, default `web`), `cluster` (default `pi-platform-prod`), `preview-domain` (default `preview.palmettointeractive.com`), `runs-on` (default `membl`), `dockerfile`, `context`, `platforms` (default `linux/amd64`), `secret-keys` (pi-platform `previews.secret_keys`; the slot may serve only those and `DATABASE_URL`), `push-role-arn`, `deploy-role-arn` (fallback; the preview environment's `ECS_DEPLOY_ROLE_ARN` wins). Outputs: `url`, `digest`.
+
+```yaml
+name: Preview
+on:
+  repository_dispatch:
+    types: [preview-up, preview-renew, preview-down]
+permissions: {}
+jobs:
+  preview:
+    permissions: { contents: read, deployments: write, id-token: write, pull-requests: read }
+    uses: Palmetto-Interactive-LLC/.github/.github/workflows/preview.yml@<40-char sha>
+    with:
+      app: <project>
+      secret-keys: '["SESSION_SECRET"]'
+      push-role-arn: ${{ vars.PI_PLATFORM_IMAGE_PUSH_ROLE_ARN }}
+```
+
+Prerequisites in pi-platform: `previews = { slots = N, service, secret_keys }` and `github.split_deploy_roles` with a `preview` environment (`deploy_branches = ["main"]`), and the repository registered with the preview manager.
 
 ### PostHog deploy annotation (optional)
 

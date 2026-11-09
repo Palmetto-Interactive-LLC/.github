@@ -1,0 +1,485 @@
+# Palmetto preview slots for ECS apps on GitHub Actions (reusable, ADR 0017).
+# Generalized from pi-client-portal's .github/workflows/preview.yml.
+#
+# The preview manager in membl-runner core owns the slot lease. When a PR opens
+# or gets a new head it takes a slot (or renews it) and sends the repository a
+# repository_dispatch: preview-up or preview-renew. When the PR closes it
+# releases the lease and sends preview-down. It has already written the masked
+# Neon branch's URL into the slot's secret, so this workflow never sees that URL
+# or the Neon key.
+#
+# Why repository_dispatch and not pull_request: repository_dispatch always runs
+# the caller's workflow file from the default branch, so a PR can't change what
+# deploys it. The preview deploy role trusts only the OIDC subject
+# repo:<owner>/<repo>:environment:preview, and pi-platform gives the preview
+# environment a main-only branch policy, so a pull_request run (ref
+# refs/pull/<n>/merge) is refused the environment before any token exists.
+#
+# The payload is untrusted input. Every value is read through env and validated
+# before use, and PR code never runs on this runner: it's only sent to Depot's
+# remote builder as a build context.
+#
+#   preview-up:     build the PR's commit (unless the manager sent a digest),
+#                   tag the lease, record a GitHub Deployment in the environment
+#                   preview-<PR number>, deploy the digest to slot <k> and report
+#                   https://<app>-<k>.<preview-domain>/ as its environment_url.
+#   preview-renew:  move the lease tag only.
+#   preview-down:   scale the slot to 0 and mark every Deployment of
+#                   preview-<PR number> inactive. (The portal's own workflow names
+#                   its Deployments preview-<slot>; this one names them by PR.)
+#
+# Per-project prerequisites (pi-platform platform-project):
+#   previews = { slots = N, service = "<service>", secret_keys = [...] }
+#   github.split_deploy_roles = true with a preview environment whose
+#     deploy_branches = ["main"]; that sets ECS_DEPLOY_ROLE_ARN on the preview
+#     environment (the preview role).
+#   PI_PLATFORM_IMAGE_PUSH_ROLE_ARN repository variable (passed as push-role-arn).
+#   The repository registered with the preview manager in membl-runner core.
+#
+# Callers trigger on repository_dispatch types [preview-up, preview-renew,
+# preview-down], pin this file by SHA and grant the job
+# `permissions: { contents: read, deployments: write, id-token: write, pull-requests: read }`.
+name: Preview
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: Project name (pi-platform platform-project name). Slot k is the ECS service <app>-preview-<k>.
+        type: string
+        required: true
+      service:
+        description: The previewed service (pi-platform previews.service). Its ECR repository is <app>/<service>.
+        type: string
+        default: web
+      cluster:
+        description: ECS cluster name.
+        type: string
+        default: pi-platform-prod
+      preview-domain:
+        description: Slot hostname domain (pi-platform previews.domain). Slot k answers at <app>-<k>.<preview-domain>.
+        type: string
+        default: preview.palmettointeractive.com
+      runs-on:
+        description: Runner label for every job.
+        type: string
+        default: membl
+      dockerfile:
+        description: Dockerfile path in the repository.
+        type: string
+        default: Dockerfile
+      context:
+        description: Build context in the repository.
+        type: string
+        default: .
+      platforms:
+        description: depot build platforms. Slots are X86_64 unless the service is multi-arch in pi-platform.
+        type: string
+        default: linux/amd64
+      secret-keys:
+        description: >-
+          JSON list of the slot secret's keys besides DATABASE_URL (pi-platform
+          previews.secret_keys). A slot revision carrying any other secret is refused.
+        type: string
+        default: "[]"
+      push-role-arn:
+        description: Pass the PI_PLATFORM_IMAGE_PUSH_ROLE_ARN GitHub variable. OIDC role that pushes <app>/<service> to ECR.
+        type: string
+        default: ""
+      deploy-role-arn:
+        description: Fallback only. The deploy job uses the ECS_DEPLOY_ROLE_ARN variable of the preview environment (the preview role) when set, else this input.
+        type: string
+        default: ""
+    secrets:
+      depot_token:
+        description: Optional. A project-scoped Depot token for depot build when no Depot OIDC trust relationship covers the repository.
+        required: false
+    outputs:
+      url:
+        description: The slot's URL, https://<app>-<slot>.<preview-domain>/ (up only).
+        value: ${{ jobs.deploy.outputs.url }}
+      digest:
+        description: The image digest deployed (up only).
+        value: ${{ jobs.deploy.outputs.digest }}
+
+permissions: {}
+
+# One slot, one change at a time, in order. A queued run is only replaced by a newer
+# one for the same slot, which is what the slot should end up doing anyway.
+concurrency:
+  group: preview-${{ github.repository }}-slot-${{ github.event.client_payload.slot }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  DEPOT_PROJECT_ID: 3bhs1495zg
+
+jobs:
+  validate:
+    name: Validate request
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      slot: ${{ steps.check.outputs.slot }}
+      pr: ${{ steps.check.outputs.pr }}
+      sha: ${{ steps.check.outputs.sha }}
+      digest: ${{ steps.check.outputs.digest }}
+      lease_expires: ${{ steps.check.outputs.lease_expires }}
+      mode: ${{ steps.check.outputs.mode }}
+    steps:
+      - name: Check the inputs, the payload and the PR
+        id: check
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          SLOT: ${{ github.event.client_payload.slot }}
+          PR: ${{ github.event.client_payload.pr }}
+          SHA: ${{ github.event.client_payload.sha }}
+          DIGEST: ${{ github.event.client_payload.digest }}
+          LEASE_EXPIRES: ${{ github.event.client_payload.lease_expires }}
+          MODE: ${{ github.event.client_payload.mode }}
+          APP: ${{ inputs.app }}
+          SERVICE: ${{ inputs.service }}
+          PREVIEW_DOMAIN: ${{ inputs.preview-domain }}
+          PLATFORMS: ${{ inputs.platforms }}
+          SECRET_KEYS: ${{ inputs.secret-keys }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          bad() { echo "::error::$1"; exit 1; }
+          test "$EVENT" = repository_dispatch || bad "Previews run only from the preview manager's repository_dispatch (this is ${EVENT})."
+          # Caller inputs.
+          [[ "$APP" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || bad "app isn't a project name."
+          [[ "$SERVICE" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || bad "service isn't a service name."
+          [[ "$PREVIEW_DOMAIN" =~ ^([a-z0-9-]+\.)*palmettointeractive\.com$ ]] || bad "preview-domain must be under palmettointeractive.com (pi-platform previews.domain)."
+          [[ "$PLATFORMS" =~ ^linux/(amd64|arm64)(,linux/(amd64|arm64))?$ ]] || bad "platforms must be linux/amd64, linux/arm64 or both."
+          jq -e 'type == "array" and all(.[]; type == "string" and test("^[A-Z][A-Z0-9_]*$"))' <<<"$SECRET_KEYS" >/dev/null \
+            || bad "secret-keys must be a JSON list of environment variable names."
+          # The payload.
+          [[ "$MODE" =~ ^(up|renew|down)$ ]] || bad "mode isn't up, renew or down."
+          test "$ACTION" = "preview-$MODE" || bad "mode doesn't match the event type."
+          # pi-platform caps slots at 3 (ADR 0017 decision 1).
+          [[ "$SLOT" =~ ^[1-3]$ ]] || bad "slot isn't 1 to 3."
+          [[ "$PR" =~ ^[1-9][0-9]{0,8}$ ]] || bad "pr isn't a number."
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || bad "sha isn't a full commit id."
+          [[ "$DIGEST" =~ ^(sha256:[0-9a-f]{64})?$ ]] || bad "digest isn't empty or a sha256 digest."
+          if test "$MODE" != down; then
+            [[ "$LEASE_EXPIRES" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|\+00:00)$ ]] \
+              || bad "lease_expires isn't an RFC3339 UTC time."
+          fi
+          if test "$MODE" = up; then
+            # A fork gets nothing, however it got here. A stale sha fails: the manager
+            # sends another dispatch for the new head.
+            pr="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}")"
+            test "$(jq -r .state <<<"$pr")" = open || bad "PR isn't open."
+            test "$(jq -r .head.repo.full_name <<<"$pr")" = "$GITHUB_REPOSITORY" || bad "PR is from a fork."
+            test "$(jq -r .head.sha <<<"$pr")" = "$SHA" || bad "sha isn't the PR's head."
+          fi
+          {
+            echo "slot=$SLOT"
+            echo "pr=$PR"
+            echo "sha=$SHA"
+            echo "digest=$DIGEST"
+            echo "lease_expires=$LEASE_EXPIRES"
+            echo "mode=$MODE"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build image
+    needs: validate
+    if: needs.validate.outputs.mode == 'up' && needs.validate.outputs.digest == ''
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    env:
+      SHA: ${{ needs.validate.outputs.sha }}
+      ECR_REPOSITORY: ${{ inputs.app }}/${{ inputs.service }}
+    steps:
+      - name: Checkout the PR's commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          persist-credentials: false
+
+      # Puts the depot CLI on PATH. depot build authenticates with Depot OIDC
+      # (id-token: write plus a trust relationship on the Depot project) or the
+      # optional depot_token secret.
+      - name: Set up Depot
+        uses: depot/setup-action@91bc8495a33ebfc504ffc89e5674379ccf23c29c # v1
+
+      - name: Require a push role
+        shell: bash
+        env:
+          AWS_ROLE_ARN: ${{ inputs.push-role-arn }}
+        run: |
+          test -n "$AWS_ROLE_ARN" || { echo "::error::Pass push-role-arn (the PI_PLATFORM_IMAGE_PUSH_ROLE_ARN GitHub variable)."; exit 1; }
+
+      - name: Configure AWS credentials through GitHub OIDC (image push)
+        uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: preview-build-${{ github.run_id }}
+          role-to-assume: ${{ inputs.push-role-arn }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2.1.6
+        with:
+          mask-password: true
+
+      - name: Build and push (skipped when the commit's image exists)
+        id: build
+        shell: bash
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          CONTEXT: ${{ inputs.context }}
+          PLATFORMS: ${{ inputs.platforms }}
+          DEPOT_TOKEN: ${{ secrets.depot_token }}
+        run: |
+          set -euo pipefail
+          uri="${REGISTRY}/${ECR_REPOSITORY}:${SHA}"
+          digest() {
+            aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids "imageTag=${SHA}" \
+              --query 'imageDetails[0].imageDigest' --output text 2>/dev/null
+          }
+          if ! found="$(digest)"; then
+            # Depot's OIDC sign-in sometimes fails with "missing API token" before the
+            # build starts. Retry that once; any other failure stops here.
+            build_log="$(mktemp)"
+            for attempt in 1 2; do
+              if depot build --project "$DEPOT_PROJECT_ID" --platform "$PLATFORMS" --provenance=false --sbom=false \
+                --label "org.opencontainers.image.revision=${SHA}" \
+                --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+                --file "$DOCKERFILE" --tag "$uri" --push "$CONTEXT" 2>&1 | tee "$build_log"; then
+                break
+              fi
+              if test "$attempt" = 1 && grep -q 'missing API token' "$build_log"; then
+                echo "::warning::Depot sign-in failed with 'missing API token'; retrying once."
+                sleep 15
+                continue
+              fi
+              exit 1
+            done
+            found="$(digest)"
+          fi
+          [[ "$found" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::No image digest for ${SHA}."; exit 1; }
+          echo "digest=$found" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: Slot ${{ needs.validate.outputs.slot }} ${{ needs.validate.outputs.mode }}
+    needs: [validate, build]
+    # build is skipped for renew, down and a digest the manager already has.
+    if: ${{ !cancelled() && needs.validate.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 20
+    # The preview role trusts exactly environment:preview. The per-PR environment
+    # (preview-<PR>) is a Deployment recorded through the API below, so it never
+    # changes the OIDC subject.
+    environment: preview
+    permissions:
+      deployments: write
+      id-token: write
+    outputs:
+      url: ${{ steps.slot.outputs.url }}
+      digest: ${{ steps.deployed.outputs.digest }}
+    env:
+      APP: ${{ inputs.app }}
+      CLUSTER: ${{ inputs.cluster }}
+      PREVIEW_DOMAIN: ${{ inputs.preview-domain }}
+      ECR_REPOSITORY: ${{ inputs.app }}/${{ inputs.service }}
+      SECRET_KEYS: ${{ inputs.secret-keys }}
+      SLOT: ${{ needs.validate.outputs.slot }}
+      PR: ${{ needs.validate.outputs.pr }}
+      SHA: ${{ needs.validate.outputs.sha }}
+      DIGEST: ${{ needs.build.outputs.digest || needs.validate.outputs.digest }}
+      LEASE_EXPIRES: ${{ needs.validate.outputs.lease_expires }}
+      MODE: ${{ needs.validate.outputs.mode }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Require a deploy role
+        shell: bash
+        env:
+          AWS_ROLE_ARN: ${{ vars.ECS_DEPLOY_ROLE_ARN || inputs.deploy-role-arn }}
+        run: |
+          test -n "$AWS_ROLE_ARN" || { echo "::error::Set ECS_DEPLOY_ROLE_ARN on the preview environment (pi-platform split deploy roles), or pass deploy-role-arn."; exit 1; }
+          echo "Deploy role: ${AWS_ROLE_ARN##*/}"
+
+      - name: Configure AWS credentials through GitHub OIDC (preview role)
+        uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: preview-${{ github.run_id }}
+          role-to-assume: ${{ vars.ECS_DEPLOY_ROLE_ARN || inputs.deploy-role-arn }}
+
+      - name: Read the slot
+        id: slot
+        shell: bash
+        run: |
+          set -euo pipefail
+          service="${APP}-preview-${SLOT}"
+          # shellcheck disable=SC2016 # backticks are JMESPath literals
+          arn="$(aws ecs describe-services --cluster "$CLUSTER" --services "$service" \
+            --query 'services[?status==`ACTIVE`] | [0].serviceArn' --output text)"
+          [[ "$arn" == arn:aws:ecs:*:service/"$CLUSTER"/"$service" ]] \
+            || { echo "::error::Service ${service} isn't active. Does pi-platform give ${APP} previews.slots >= ${SLOT}?"; exit 1; }
+          host="${APP}-${SLOT}.${PREVIEW_DOMAIN}"
+          {
+            echo "service=$service"
+            echo "arn=$arn"
+            echo "host=$host"
+            echo "url=https://${host}/"
+          } >> "$GITHUB_OUTPUT"
+
+      # The backstop reaps on this tag, and reports a running slot with none, so the
+      # tag goes on before the task can start.
+      - name: Tag the lease
+        if: env.MODE != 'down'
+        shell: bash
+        env:
+          ARN: ${{ steps.slot.outputs.arn }}
+        run: |
+          set -euo pipefail
+          aws ecs tag-resource --resource-arn "$ARN" \
+            --tags "key=membl:lease-expires,value=${LEASE_EXPIRES}" "key=membl:pr,value=${PR}"
+          echo "Lease tag: ${LEASE_EXPIRES}, PR #${PR}"
+
+      - name: Record a GitHub Deployment
+        id: deployment
+        if: env.MODE == 'up'
+        shell: bash
+        run: |
+          set -euo pipefail
+          id="$(jq -nc --arg ref "$SHA" --arg env "preview-${PR}" --arg pr "$PR" --arg slot "$SLOT" \
+            '{ref: $ref, environment: $env, description: ("PR #" + $pr + " on slot " + $slot), auto_merge: false,
+              required_contexts: [], transient_environment: true, production_environment: false}' \
+            | gh api "repos/${GITHUB_REPOSITORY}/deployments" --input - -q .id)"
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy the image
+        id: deployed
+        if: env.MODE == 'up'
+        shell: bash
+        env:
+          SERVICE: ${{ steps.slot.outputs.service }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::No image digest to deploy."; exit 1; }
+          account="$(aws sts get-caller-identity --query Account --output text)"
+          image="${account}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${DIGEST}"
+          base="$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \
+            --query 'services[0].taskDefinition' --output text)"
+          aws ecs describe-task-definition --task-definition "$base" --query taskDefinition --output json \
+            | jq --arg image "$image" '
+                del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities,
+                    .registeredAt, .registeredBy, .deregisteredAt)
+                | if (.containerDefinitions | length) == 1 then .containerDefinitions[0].image = $image
+                  else error("expected one container") end' > "$RUNNER_TEMP/taskdef.json"
+          # A slot serves with its own secret only: the branch's URL and the keys
+          # pi-platform declares for the slot (previews.secret_keys).
+          extra="$(jq -r --argjson allowed "$SECRET_KEYS" '.containerDefinitions[].secrets[]?.name
+            | select(. as $n | ($allowed + ["DATABASE_URL"]) | index($n) | not)' "$RUNNER_TEMP/taskdef.json")"
+          test -z "$extra" || { echo "::error::Slot would carry undeclared secrets: $(paste -sd, - <<<"$extra")"; exit 1; }
+          arn="$(aws ecs register-task-definition --cli-input-json "file://$RUNNER_TEMP/taskdef.json" \
+            --query taskDefinition.taskDefinitionArn --output text)"
+          echo "Registered ${arn##*/}"
+          # A slot that sits at 0 still names the previous PR's task definition. Raising the count
+          # and the definition in one call makes ECS start that old task first, with this PR's
+          # new secret, so it runs the previous PR's image (and migrations) against this PR's
+          # database. Point the service at the new revision while it runs nothing, then scale up.
+          current="$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \
+            --query 'services[0].desiredCount' --output text)"
+          if [ "$current" = 0 ]; then
+            aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" --task-definition "$arn" \
+              --desired-count 0 --query 'service.deployments[0].id' --output text
+            aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE"
+            aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" --desired-count 1 \
+              --query 'service.deployments[0].id' --output text
+          else
+            aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" --task-definition "$arn" \
+              --desired-count 1 --force-new-deployment --query 'service.deployments[0].id' --output text
+          fi
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE"
+          echo "${SERVICE} is stable on ${arn##*/}."
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Check the page answers
+        if: env.MODE == 'up'
+        shell: bash
+        env:
+          HOST: ${{ steps.slot.outputs.host }}
+        run: |
+          set -euo pipefail
+          # The staging login gate answers before the app, so this proves routing and
+          # TLS; the app's own health is what the ECS and ALB checks just proved.
+          for _ in 1 2 3 4 5 6; do
+            code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://${HOST}/" || true)"
+            if [[ "$code" =~ ^(200|301|302|303|307|308)$ ]]; then echo "https://${HOST}/ answered ${code}."; exit 0; fi
+            sleep 10
+          done
+          echo "::error::https://${HOST}/ answered ${code}."
+          exit 1
+
+      - name: Report the Deployment
+        if: always() && steps.deployment.outputs.id != ''
+        shell: bash
+        env:
+          ID: ${{ steps.deployment.outputs.id }}
+          URL: ${{ steps.slot.outputs.url }}
+          OUTCOME: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          state=failure
+          test "$OUTCOME" = success && state=success
+          gh api "repos/${GITHUB_REPOSITORY}/deployments/${ID}/statuses" -f state="$state" \
+            -f environment_url="$URL" -F auto_inactive=true -q .state
+
+      # Only stop the slot if this PR still holds it. A late or replayed down for an
+      # old PR must not stop a slot that now serves a newer one. An untagged slot
+      # (before membl:pr existed) is stopped as before.
+      - name: Scale to zero
+        if: env.MODE == 'down'
+        shell: bash
+        env:
+          SERVICE: ${{ steps.slot.outputs.service }}
+          ARN: ${{ steps.slot.outputs.arn }}
+        run: |
+          set -euo pipefail
+          holder="$(aws ecs list-tags-for-resource --resource-arn "$ARN" \
+            --query "tags[?key=='membl:pr'].value | [0]" --output text)"
+          if test -n "$holder" && test "$holder" != "None" && test "$holder" != "$PR"; then
+            echo "::notice::Slot ${SLOT} now serves PR #${holder}, not #${PR}. Leaving it running."
+            exit 0
+          fi
+          aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" --desired-count 0 \
+            --query 'service.desiredCount' --output text
+
+      - name: Mark the PR's Deployments inactive
+        if: env.MODE == 'down'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for id in $(gh api --paginate "repos/${GITHUB_REPOSITORY}/deployments?environment=preview-${PR}&per_page=100" -q '.[].id'); do
+            gh api "repos/${GITHUB_REPOSITORY}/deployments/${id}/statuses" -f state=inactive -q .state
+          done
+
+      - name: Job summary
+        if: always()
+        shell: bash
+        env:
+          URL: ${{ steps.slot.outputs.url }}
+        run: |
+          {
+            echo "### Preview ${MODE}: PR #${PR} on slot ${SLOT}"
+            echo
+            echo "- Environment: \`preview-${PR}\`"
+            if test -n "${URL:-}"; then echo "- URL: ${URL}"; fi
+            if test -n "${DIGEST:-}"; then echo "- Image: \`${ECR_REPOSITORY}@${DIGEST}\`"; fi
+          } >> "$GITHUB_STEP_SUMMARY"

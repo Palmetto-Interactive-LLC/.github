@@ -182,8 +182,9 @@ jobs:
           set -euo pipefail
           # BEGIN staging-seed-guard
           if test "$MODE" = "staging" && test -n "$STAGING_SEED_SCRIPT"; then
-            test "$HAS_STAGING" = "true" && test -n "$STAGING_SEED_ROLE" \
-              || { echo "::error::A staging seed hook needs staging enabled and a dedicated seed role."; exit 1; }
+            if test "$HAS_STAGING" != "true" || test -z "$STAGING_SEED_ROLE"; then
+              echo "::error::A staging seed hook needs staging enabled and a dedicated seed role."; exit 1
+            fi
           fi
           # END staging-seed-guard
           case "$MODE" in
@@ -569,18 +570,21 @@ jobs:
         run: |
           set -euo pipefail
           # BEGIN staging-seed
-          test "$MODE" = "staging" && test "$DEPLOY_ENV" = "staging" \
-            || { echo "::error::A seed hook is staging-only."; exit 1; }
-          test "$GITHUB_REF" = "refs/heads/main" && [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]] \
-            || { echo "::error::Staging seeding requires protected main and an immutable source SHA."; exit 1; }
+          if test "$MODE" != "staging" || test "$DEPLOY_ENV" != "staging"; then
+            echo "::error::A seed hook is staging-only."; exit 1
+          fi
+          if test "$GITHUB_REF" != "refs/heads/main" || ! [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Staging seeding requires protected main and an immutable source SHA."; exit 1
+          fi
           test -n "$STAGING_SEED_ROLE" \
             || { echo "::error::A dedicated staging seed role is required."; exit 1; }
           # This is one reviewed local filename, never shell text or an external path.
           [[ "$STAGING_SEED_SCRIPT" =~ ^[.]/[A-Za-z0-9_./-]+[.]sh$ ]] \
             || { echo "::error::staging-seed-script must be a caller-relative shell file."; exit 1; }
           case "/${STAGING_SEED_SCRIPT#./}/" in *"/../"*|*"/./"*) echo "::error::Invalid staging seed path."; exit 1 ;; esac
-          test -f "$STAGING_SEED_SCRIPT" && test ! -L "$STAGING_SEED_SCRIPT" \
-            || { echo "::error::The staging seed caller is missing or a symlink."; exit 1; }
+          if test ! -f "$STAGING_SEED_SCRIPT" || test -L "$STAGING_SEED_SCRIPT"; then
+            echo "::error::The staging seed caller is missing or a symlink."; exit 1
+          fi
           workspace="$(realpath "$GITHUB_WORKSPACE")"
           script="$(realpath "$STAGING_SEED_SCRIPT")"
           case "$script" in "$workspace"/*) ;; *) echo "::error::Seed caller escapes its checkout."; exit 1 ;; esac

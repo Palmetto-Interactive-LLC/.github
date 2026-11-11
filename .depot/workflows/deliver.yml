@@ -132,9 +132,6 @@ on:
       staging_temporal_codec_keyring:
         description: 'Optional KMS-wrapped staging-only codec keyring.'
         required: false
-      incident_io_url:
-        description: 'Optional. The INCIDENT_IO_CI_ALERT_URL Depot CI secret (incident.io "CI" HTTP alert source URL incl. token). A failed delivery posts a non-paging alert to it.'
-        required: false
       POSTHOG_ANNOTATION_KEY:
         description: >-
           Optional PostHog personal API key scoped to annotation:write. When set
@@ -944,34 +941,3 @@ jobs:
             jq -r '.[] | "- Image: `\(.repo)@\(.digest)` (linux/\(.arch // "unknown"))"' <<<"$IMAGES"
             if test -n "$DEPLOY"; then jq -r '.[] | "- Task definition: `\(.arn | split("/")[-1])`"' <<<"$DEPLOY"; fi
           } >> "$GITHUB_STEP_SUMMARY"
-
-  # Non-paging alert to incident.io (the "CI" HTTP alert source) when any
-  # delivery job failed. A skipped delivery (stale head, disabled) is not a failure.
-  alert:
-    name: Alert on failure
-    needs: [guard, build, release, deploy]
-    if: failure()
-    runs-on: depot-ubuntu-24.04
-    timeout-minutes: 5
-    permissions: {}
-    steps:
-      - name: Post to incident.io
-        shell: bash
-        env:
-          ALERT_URL: ${{ secrets.incident_io_url }}
-          REPO: ${{ github.repository }}
-          MODE: ${{ inputs.mode }}
-          APP: ${{ inputs.app }}
-        run: |
-          set -euo pipefail
-          if test -z "$ALERT_URL"; then
-            echo "::notice::No incident_io_url secret passed. Not alerting."; exit 0
-          fi
-          echo "::add-mask::$ALERT_URL"
-          payload="$(jq -nc --arg app "$APP" --arg mode "$MODE" --arg repo "$REPO" --arg sha "$GITHUB_SHA" --arg job "${DEPOT_JOB_URL:-}" \
-            '{title: "Delivery failed: \($app) (\($mode))",
-              description: "\($repo) @ \($sha[0:12]) failed to deliver (\($mode)). Run: \($job)",
-              deduplication_key: "deliver-\($repo)-\($mode)-\($sha)",
-              status: "firing"}')"
-          code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 -X POST -H 'Content-Type: application/json' -d "$payload" "$ALERT_URL" 2>/dev/null || true)"
-          case "$code" in 2??) echo "Alert sent." ;; *) echo "::warning::incident.io alert returned HTTP ${code:-none}." ;; esac

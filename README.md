@@ -11,7 +11,7 @@ Everything runs on Depot CI (owner decision 2026-11-01; no AWS CodeBuild, no Git
 3. **Merge to `main`:** `deliver.yml` (staging) builds the image, pushes it to ECR by full git SHA and deploys **staging** only.
 4. **Production:** the manual **Create Release** workflow (`pi-release.yml`), run by hand from `main`. Heavy gates, staging-digest check, ECR CRITICAL scan, tag `vYYYY.MM.DD.N`, then the same digest to prod. **Prod never deploys automatically.**
 
-A failed default-branch delivery or release posts a non-paging alert to incident.io (the `incident_io_url` secret; it must use underscores, because Depot rejects hyphenated secret names on reusable workflows).
+A failed default-branch delivery fails its run and has no separate alert. A release reports how it ended, success or failure, to Slack `#client-releases` through the `notify` job. Secret names on reusable workflows must use underscores, because Depot rejects hyphenated ones.
 
 ## Reusable workflows
 
@@ -129,7 +129,7 @@ The caller job id decides the required status context, for example `CI / pi-chec
 
 ## pi-release (Create Release)
 
-The caller workflow is named exactly **Create Release** and has one trigger, `workflow_dispatch`, with optional inputs `dry_run` (gates only: no tag, no deploy) and `requested_by`. It takes the `pi-checks` inputs plus the `deliver.yml` inputs, `deploy` (default `true`), and the Depot CI variables as inputs: `deploy-enabled`, `push-role-arn`, `deploy-role-arn`, `serving-secrets`, `posthog-project-id`, `notify-role-arn`, `app-url`. Jobs: `mode` (refuses anything but a dispatch on `main`), `gates`, `deliver`, `tag` (only with `deploy: false`: gates, then tag and GitHub Release, for repos with no ECS service such as pi-platform), `notify` (always, except a dry run; invokes the `pi-release-notify` Lambda through `notify-role-arn`, whose role must trust the Depot OIDC subject; skipped with a warning when empty), and `alert` (incident.io when gates or tag fail). The calling job needs `permissions: { contents: write, id-token: write }` and no `environment:`.
+The caller workflow is named exactly **Create Release** and has one trigger, `workflow_dispatch`, with optional inputs `dry_run` (gates only: no tag, no deploy) and `requested_by`. It takes the `pi-checks` inputs plus the `deliver.yml` inputs, `deploy` (default `true`), and the Depot CI variables as inputs: `deploy-enabled`, `push-role-arn`, `deploy-role-arn`, `serving-secrets`, `posthog-project-id`, `notify-role-arn`, `app-url`. Jobs: `mode` (refuses anything but a dispatch on `main`), `gates`, `deliver`, `tag` (only with `deploy: false`: gates, then tag and GitHub Release, for repos with no ECS service such as pi-platform) and `notify` (always, except a dry run; invokes the `pi-release-notify` Lambda through `notify-role-arn`, whose role must trust the Depot OIDC subject; skipped with a warning when empty). The calling job needs `permissions: { contents: write, id-token: write }` and no `environment:`.
 
 Outputs: `release_url`, `release_tag`, `app_url`, `image_digest`, `run_url`.
 

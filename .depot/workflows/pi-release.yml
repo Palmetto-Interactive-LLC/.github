@@ -147,9 +147,6 @@ on:
         type: boolean
         default: true
     secrets:
-      incident_io_url:
-        description: 'Optional. The INCIDENT_IO_CI_ALERT_URL Depot CI secret. A failed delivery or release posts a non-paging alert to it.'
-        required: false
       POSTHOG_ANNOTATION_KEY:
         description: >-
           Optional PostHog personal API key scoped to annotation:write. When set
@@ -253,7 +250,6 @@ jobs:
       serving-secrets: ${{ inputs.serving-secrets }}
       posthog-project-id: ${{ inputs.posthog-project-id }}
     secrets:
-      incident_io_url: ${{ secrets.incident_io_url }}
       POSTHOG_ANNOTATION_KEY: ${{ secrets.POSTHOG_ANNOTATION_KEY }}
 
   # No ECS service: the gates passed, so cut the tag and the GitHub Release.
@@ -437,33 +433,3 @@ jobs:
             '{action:"release_result", repository:$repository, run_id:$run_id, run_attempt:$run_attempt, conclusion:$conclusion, mode:$mode, sha:$sha, requested_by:$requested_by, release_tag:$release_tag, release_url:$release_url, app_url:$app_url, image_digest:$image_digest, run_url:$run_url}')"
           aws lambda invoke --function-name pi-release-notify --cli-binary-format raw-in-base64-out --payload "$payload" "$RUNNER_TEMP/notify.json" >/dev/null
           echo "Release bot notified (${CONCLUSION})."
-
-  # Non-paging alert to incident.io when the gates or the tag job failed. A
-  # failed delivery is alerted by deliver.yml itself.
-  alert:
-    name: Alert on failure
-    needs: [gates, tag]
-    if: failure()
-    runs-on: depot-ubuntu-24.04
-    timeout-minutes: 5
-    permissions: {}
-    steps:
-      - name: Post to incident.io
-        shell: bash
-        env:
-          ALERT_URL: ${{ secrets.incident_io_url }}
-          REPO: ${{ github.repository }}
-          APP: ${{ inputs.app }}
-        run: |
-          set -euo pipefail
-          if test -z "$ALERT_URL"; then
-            echo "::notice::No incident_io_url secret passed. Not alerting."; exit 0
-          fi
-          echo "::add-mask::$ALERT_URL"
-          payload="$(jq -nc --arg repo "$REPO" --arg app "${APP:-$REPO}" --arg sha "$GITHUB_SHA" --arg job "${DEPOT_JOB_URL:-}" \
-            '{title: "Release gates failed: \($app)",
-              description: "\($repo) @ \($sha[0:12]) failed the release gates or tag. Run: \($job)",
-              deduplication_key: "release-\($repo)-\($sha)",
-              status: "firing"}')"
-          code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 -X POST -H 'Content-Type: application/json' -d "$payload" "$ALERT_URL" 2>/dev/null || true)"
-          case "$code" in 2??) echo "Alert sent." ;; *) echo "::warning::incident.io alert returned HTTP ${code:-none}." ;; esac

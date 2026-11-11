@@ -97,6 +97,11 @@ import copy, subprocess
 # after merge, so a mutable baseline would make main reject its own additions.
 baseline_ref='0ab85924b9912af8650d7761e269382d66d4c3dd'
 baseline=yaml.load(subprocess.check_output(['git','show',baseline_ref+':.depot/workflows/deliver.yml'],text=True),Loader=yaml.BaseLoader)
+# The baseline predates the removal of the incident.io failure alert (PAL-1394).
+# That secret and job are gone on purpose; everything else must still match.
+del baseline['on']['workflow_call']['secrets']['incident_io_url']
+del baseline['jobs']['alert']
+assert 'alert' not in wf['jobs'] and 'incident_io_url' not in wf['on']['workflow_call']['secrets']
 prior=copy.deepcopy(wf)
 for name in ['staging-seed-script','staging-seed-role-arn','staging-seed-config']:
     del prior['on']['workflow_call']['inputs'][name]

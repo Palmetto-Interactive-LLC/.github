@@ -49,7 +49,7 @@ on:
       runs-on:
         description: Runner label for every job.
         type: string
-        default: membl
+        default: membl-x64
       environment:
         description: GitHub environment for the deploy job. Empty means production in release mode and staging otherwise.
         type: string

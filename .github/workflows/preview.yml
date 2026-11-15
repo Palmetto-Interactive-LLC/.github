@@ -63,7 +63,7 @@ on:
       runs-on:
         description: Runner label for every job.
         type: string
-        default: membl
+        default: membl-x4x-us
       dockerfile:
         description: Dockerfile path in the repository.
         type: string

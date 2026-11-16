@@ -165,7 +165,7 @@ on:
     outputs:
       version:
         description: The release tag (release) or sha-<12>.
-        value: ${{ jobs.release.outputs.version || jobs.build.outputs.version }}
+        value: ${{ jobs.deploy.outputs.version || jobs.build.outputs.version }}
       image_digest:
         description: Digest of the first image.
         value: ${{ jobs.build.outputs.image_digest }}
@@ -174,9 +174,9 @@ permissions: {}
 
 # No workflow-level lock: GitHub keeps one waiting run per lock and cancels
 # it when a newer run queues, so a run-wide lock lost builds to busy merges.
-# Only the jobs that change shared state take a lock (cut release: the tag
-# sequence; deploy: one lock per environment), and the deploy re-checks under
-# its lock that it does not roll a service back.
+# Only the deploy takes a lock, one per environment. Under it the deploy
+# re-checks that it does not roll a service back, and only then cuts the
+# release tag.
 
 env:
   AWS_REGION: us-east-1
@@ -638,77 +638,11 @@ jobs:
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "image_digest=$(jq -r '.[0].digest // empty' <<<"$BUILT")" >> "$GITHUB_OUTPUT"
 
-  # Release only: the tag and GitHub Release, cut after the gates and before
-  # prod is touched.
-  release:
-    name: Cut release
-    needs: build
-    # A rollback cuts no tag: it redeploys a prior release.
-    if: inputs.mode == 'release' && inputs.digest == ''
-    runs-on: ${{ inputs.runs-on }}
-    timeout-minutes: 15
-    # Builds take no lock, so two releases can choose the same tag number.
-    # The cut holds this lock and takes the next free number.
-    concurrency:
-      group: deliver-${{ github.repository }}-cut
-      cancel-in-progress: false
-    permissions:
-      contents: write
-    outputs:
-      version: ${{ steps.cut.outputs.version }}
-    env:
-      GH_TOKEN: ${{ github.token }}
-      VERSION: ${{ needs.build.outputs.version }}
-      IMAGES: ${{ needs.build.outputs.images }}
-      APP: ${{ inputs.app }}
-      SERVICES_INPUT: ${{ inputs.services }}
-    steps:
-      # Membl Meleys runner guests lacked /dev/fd until membl-runner #373's host image is live, and this
-      # workflow uses bash process substitution. A no-op wherever /dev/fd already exists.
-      - name: Ensure /dev/fd
-        shell: bash
-        run: '[ -e /dev/fd ] || sudo ln -s /proc/self/fd /dev/fd || true'
-      - name: Cut the release (tag and GitHub Release)
-        id: cut
-        shell: bash
-        run: |
-          set -euo pipefail
-          # BEGIN tag-number
-          # The build chose VERSION without the lock. If another commit has
-          # taken that tag since, use the next free number.
-          # Tested by scripts/tests/pi-deliver-tag-number.sh.
-          if gh api "repos/${GITHUB_REPOSITORY}/commits/${VERSION}" --jq .sha >"$RUNNER_TEMP/tagged" 2>/dev/null \
-            && test "$(cat "$RUNNER_TEMP/tagged")" != "$GITHUB_SHA"; then
-            prefix="v$(date -u +%Y.%m.%d)."
-            last="$(gh api "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/${prefix}" | jq -r --arg p "refs/tags/${prefix}" \
-              '[.[].ref | ltrimstr($p) | select(test("^[0-9]+$")) | tonumber] | max // 0')"
-            echo "Tag ${VERSION} points at $(cat "$RUNNER_TEMP/tagged"); using ${prefix}$((last + 1))."
-            VERSION="${prefix}$((last + 1))"
-          fi
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          # END tag-number
-          if gh api "repos/${GITHUB_REPOSITORY}/commits/${VERSION}" --jq .sha >"$RUNNER_TEMP/tagged" 2>/dev/null; then
-            test "$(cat "$RUNNER_TEMP/tagged")" = "$GITHUB_SHA" \
-              || { echo "::error::Tag ${VERSION} points at $(cat "$RUNNER_TEMP/tagged"), not ${GITHUB_SHA}."; exit 1; }
-            echo "Tag ${VERSION} already points at ${GITHUB_SHA}."
-          fi
-          if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release ${VERSION} already exists."
-          else
-            notes="$(jq -r '"Images (linux/\(.[0].arch // "amd64")), deployed by digest:\n" + ([.[] | "- `\(.repo)@\(.digest)`"] | join("\n"))' <<<"$IMAGES")"
-            # A rollback to this release redeploys exactly these services.
-            services="${SERVICES_INPUT:-}"; test -n "$services" || services="$(jq -nc --arg a "$APP" '[$a]')"
-            notes="${notes}"$'\n\n'"Services: $(jq -r 'map("`" + . + "`") | join(", ")' <<<"$services")"
-            gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$VERSION" \
-              --generate-notes --notes "$notes"
-          fi
-
   deploy:
     name: Deploy ${{ inputs.mode == 'release' && 'prod' || 'staging' }}
-    needs: [guard, build, release]
-    # release is skipped outside release mode; a failed release stops prod. An image-only
-    # build (stale) never deploys.
-    if: ${{ !cancelled() && needs.guard.outputs.stale == 'false' && needs.build.result == 'success' && (needs.release.result == 'success' || needs.release.result == 'skipped') && (inputs.has-staging || inputs.mode == 'release') }}
+    needs: [guard, build]
+    # An image-only build (stale) never deploys.
+    if: ${{ !cancelled() && needs.guard.outputs.stale == 'false' && needs.build.result == 'success' && (inputs.has-staging || inputs.mode == 'release') }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 90
     # One deploy per environment at a time. A running deploy is never
@@ -721,8 +655,10 @@ jobs:
       name: ${{ inputs.environment != '' && inputs.environment || (inputs.mode == 'release' && 'production' || 'staging') }}
       url: ${{ inputs.mode != 'release' && inputs.staging-url || '' }}
     permissions:
-      contents: read
+      contents: write # cut the release tag
       id-token: write
+    outputs:
+      version: ${{ steps.cut.outputs.version || needs.build.outputs.version }}
     env:
       MODE: ${{ inputs.mode }}
       KIND: ${{ inputs.digest != '' && 'rollback' || inputs.mode }}
@@ -732,7 +668,9 @@ jobs:
       # A rollback deploys only the services its release deployed.
       SERVICES_INPUT: ${{ needs.build.outputs.rollback_services || inputs.services }}
       IMAGES: ${{ needs.build.outputs.images }}
-      VERSION: ${{ needs.release.outputs.version || needs.build.outputs.version }}
+      # The build's choice. A release can take another number when it cuts
+      # the tag, so the steps after the cut read steps.cut.outputs.version.
+      VERSION: ${{ needs.build.outputs.version }}
       MIGRATE_COMMAND: ${{ inputs.migrate-command }}
       MIGRATE_SECRETS: ${{ inputs.migrate-secrets }}
       MAIN_CONTAINER: ${{ inputs.container-name }}
@@ -840,10 +778,54 @@ jobs:
           done
           echo "Staging runs the digest(s) being released."
 
+      # Cut under the deploy lock and after the re-check, so a deploy that is
+      # skipped leaves no tag behind, and the newest tag stays the newest
+      # commit prod was sent. A rollback cuts no tag: it redeploys a prior
+      # release.
+      - name: Cut the release (tag and GitHub Release)
+        id: cut
+        if: env.MODE == 'release' && inputs.digest == '' && steps.recheck.outputs.skip != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # BEGIN tag-number
+          # The build chose VERSION without a lock. If another commit has
+          # taken that tag since, use the next free number.
+          # Tested by scripts/tests/pi-deliver-tag-number.sh.
+          if gh api "repos/${GITHUB_REPOSITORY}/commits/${VERSION}" --jq .sha >"$RUNNER_TEMP/tagged" 2>/dev/null \
+            && test "$(cat "$RUNNER_TEMP/tagged")" != "$GITHUB_SHA"; then
+            prefix="v$(date -u +%Y.%m.%d)."
+            last="$(gh api "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/${prefix}" | jq -r --arg p "refs/tags/${prefix}" \
+              '[.[].ref | ltrimstr($p) | select(test("^[0-9]+$")) | tonumber] | max // 0')"
+            echo "Tag ${VERSION} points at $(cat "$RUNNER_TEMP/tagged"); using ${prefix}$((last + 1))."
+            VERSION="${prefix}$((last + 1))"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          # END tag-number
+          if gh api "repos/${GITHUB_REPOSITORY}/commits/${VERSION}" --jq .sha >"$RUNNER_TEMP/tagged" 2>/dev/null; then
+            test "$(cat "$RUNNER_TEMP/tagged")" = "$GITHUB_SHA" \
+              || { echo "::error::Tag ${VERSION} points at $(cat "$RUNNER_TEMP/tagged"), not ${GITHUB_SHA}."; exit 1; }
+            echo "Tag ${VERSION} already points at ${GITHUB_SHA}."
+          fi
+          if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release ${VERSION} already exists."
+          else
+            notes="$(jq -r '"Images (linux/\(.[0].arch // "amd64")), deployed by digest:\n" + ([.[] | "- `\(.repo)@\(.digest)`"] | join("\n"))' <<<"$IMAGES")"
+            # A rollback to this release redeploys exactly these services.
+            services="${SERVICES_INPUT:-}"; test -n "$services" || services="$(jq -nc --arg a "$APP" '[$a]')"
+            notes="${notes}"$'\n\n'"Services: $(jq -r 'map("`" + . + "`") | join(", ")' <<<"$services")"
+            gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$VERSION" \
+              --generate-notes --notes "$notes"
+          fi
+
       - name: Register task definitions with the new image
         id: register
         if: steps.recheck.outputs.skip != 'true'
         shell: bash
+        env:
+          VERSION: ${{ steps.cut.outputs.version || needs.build.outputs.version }}
         run: |
           set -euo pipefail
           if test -n "$SERVICES_INPUT"; then services="$SERVICES_INPUT"; else services="$(jq -nc --arg a "$APP" '[$a]')"; fi
@@ -1123,6 +1105,7 @@ jobs:
           POSTHOG_PROJECT_ID: ${{ inputs.posthog-project-id }}
           POSTHOG_ANNOTATION_KEY: ${{ secrets.POSTHOG_ANNOTATION_KEY }}
           POSTHOG_HOST: https://us.posthog.com
+          VERSION: ${{ steps.cut.outputs.version || needs.build.outputs.version }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -1142,6 +1125,7 @@ jobs:
         shell: bash
         env:
           DEPLOY: ${{ steps.register.outputs.deploy }}
+          VERSION: ${{ steps.cut.outputs.version || needs.build.outputs.version }}
         run: |
           {
             echo "### Deploy ${DEPLOY_ENV}$(test "$KIND" = rollback && echo ' (rollback)')"

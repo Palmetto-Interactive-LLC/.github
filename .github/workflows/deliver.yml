@@ -87,9 +87,10 @@ on:
         description: >-
           Comma-separated depot build platforms. linux/amd64 (default) builds one
           image manifest and pins the revision to X86_64. linux/amd64,linux/arm64
-          pushes a multi-arch index and registers the revision without a
-          runtimePlatform, so ECS places it on x86_64 or arm64 hosts and each host
-          pulls its own architecture.
+          pushes a multi-arch index and registers the revision with the live
+          revision's runtimePlatform unchanged, so the service stays on whatever
+          architecture it runs on (X86_64 or ARM64) and each task pulls its own
+          architecture from the index.
         type: string
         default: linux/amd64
       container-name:
@@ -909,14 +910,15 @@ jobs:
             # BEGIN runtime-platform
             # The revision's CPU architecture follows its image, not the copied
             # live revision: ECS places an X86_64 revision only on x86_64 hosts
-            # and an ARM64 one only on arm64 hosts. A multi-arch image (amd64 and
-            # arm64) gets no runtimePlatform: the EC2 task places on either kind
-            # of host and each pulls its own architecture from the index. Tested
-            # by scripts/tests/pi-deliver-runtime-platform.sh.
+            # and an ARM64 one only on arm64 hosts (Fargate with no runtimePlatform
+            # is X86_64). A multi-arch image (amd64 and arm64) runs on either, so
+            # it keeps the live revision's runtimePlatform: whoever moved the
+            # service to ARM64 owns that choice, and a deliver must not undo it.
+            # Tested by scripts/tests/pi-deliver-runtime-platform.sh.
             img_arch="$(jq -r '.[0].arch // ""' <<<"$IMAGES")"
             if test "$img_arch" = "amd64,arm64"; then
-              rp_filter='del(.runtimePlatform)'
-              cpu_arch="any (multi-arch image)"
+              rp_filter='.'
+              cpu_arch="kept from the live revision (multi-arch image)"
             else
               cpu_arch="$(jq -rn --arg a "$img_arch" '{amd64: "X86_64", arm64: "ARM64"}[$a] // empty')"
               test -n "$cpu_arch" || { echo "::error::No known architecture on the images of this build ($(jq -c '[.[].arch]' <<<"$IMAGES"))."; exit 1; }

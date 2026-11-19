@@ -4,7 +4,8 @@
 # build and which deploy: the head always ships; an app with staging, or a
 # rollback, ships only the head; without staging an older merge pushes its image
 # without deploying, and an older release ships unless prod's newest release tag
-# descends from it.
+# descends from it. A release with delivery off never reaches this block (the step before it
+# fails the Guard; see pi-deliver-deploy-wiring.sh), so the off case here is staging mode.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -62,7 +63,7 @@ run_case() {
 }
 
 tags="v2026.11.14.9 v2026.11.15.10 v2026.11.15.2 v1.0"
-ENABLED=false run_case "delivery off: nothing runs" release false "" aaa "$tags" ppp ahead ahead "stale=true build=false"
+ENABLED=false run_case "delivery off, staging mode: nothing runs" staging false "" aaa "$tags" ppp ahead ahead "stale=true build=false"
 run_case "head, staging mode, no staging services" staging false "" aaa "$tags" ppp ahead ahead "stale=false build=true"
 run_case "head, release" release false "" aaa "$tags" ppp ahead ahead "stale=false build=true"
 run_case "head, rollback" release false "sha256:x" aaa "$tags" ppp ahead ahead "stale=false build=true"

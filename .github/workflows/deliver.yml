@@ -38,8 +38,12 @@
 #
 # Callers pin this file by SHA and grant the job
 # `permissions: { contents: write, id-token: write }`.
-#   ECS_DEPLOY_ENABLED               "true" turns delivery on
-#   PI_PLATFORM_IMAGE_PUSH_ROLE_ARN  OIDC role that pushes this app's ECR repos
+#   ECS_DEPLOY_ENABLED               "true" turns delivery on. Anything else skips a staging-mode run
+#                                    quietly. A release on main fails the Guard job instead (the
+#                                    "Require the deploy switch and wiring" step): a skipped release
+#                                    ends green and ships nothing.
+#   PI_PLATFORM_IMAGE_PUSH_ROLE_ARN  OIDC role that pushes this app's ECR repos (a release on main
+#                                    fails the Guard when it is empty)
 #   ECS_DEPLOY_ROLE_ARN              OIDC role that registers task definitions and updates services
 #   ECS_SERVING_SECRETS              JSON {"<service>-<env>": ["SECRET_NAME", ...]} the serving revision may hold
 name: Deliver
@@ -116,7 +120,7 @@ on:
         type: string
         default: ""
       deploy-enabled:
-        description: 'Pass the ECS_DEPLOY_ENABLED GitHub variable. Delivery runs only when this is "true".'
+        description: 'Pass the ECS_DEPLOY_ENABLED GitHub variable. Delivery runs only when this is "true". Otherwise a staging-mode run skips quietly and a release on main fails the Guard job.'
         type: string
         default: ""
       push-role-arn:
@@ -231,6 +235,45 @@ jobs:
             *) echo "::error::mode must be staging or release."; exit 1 ;;
           esac
 
+      # A release on main must not skip quietly. With the deploy switch off, the head guard
+      # below skips Build and Deploy and the run ends green with nothing shipped (membl.io
+      # went five days unshipped that way, 2026-11-14 to 11-19). This step fails the Guard,
+      # by name, instead. mode=staging keeps the quiet skip. It checks the two values this job
+      # can see. It does not check deploy-role-arn: the deploy job takes its GitHub
+      # environment's ECS_DEPLOY_ROLE_ARN first, which this job cannot read (callers that use
+      # split deploy roles pass no deploy-role-arn), and the deploy job's "Require a deploy
+      # role" step already fails when neither is set.
+      - name: Require the deploy switch and wiring (release)
+        if: inputs.mode == 'release'
+        shell: bash
+        env:
+          DEPLOY_ENABLED: ${{ inputs.deploy-enabled }}
+          PUSH_ROLE_ARN: ${{ inputs.push-role-arn }}
+        run: |
+          set -euo pipefail
+          # BEGIN deploy-wiring
+          # Tested by scripts/tests/pi-deliver-deploy-wiring.sh.
+          missing=()
+          if test "$DEPLOY_ENABLED" != "true"; then
+            shown="${DEPLOY_ENABLED//[^A-Za-z0-9_.-]/?}"
+            missing+=("ECS_DEPLOY_ENABLED must be \"true\" (the deploy-enabled input is '${shown}')")
+          fi
+          if test -z "$PUSH_ROLE_ARN"; then
+            missing+=("PI_PLATFORM_IMAGE_PUSH_ROLE_ARN is empty (the push-role-arn input)")
+          fi
+          if test "${#missing[@]}" -gt 0; then
+            for item in "${missing[@]}"; do echo "::error::Release on main cannot ship: ${item}."; done
+            echo "::error::Build and Deploy would be skipped and the run would end green with nothing shipped. Set the missing GitHub Actions variables on the repository and pass them to this workflow."
+            {
+              echo "### Release failed: the deploy switch or wiring is missing"
+              printf -- '- %s\n' "${missing[@]}"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          # END deploy-wiring
+
+      # A release with the deploy switch off never gets here: the step above fails it. The
+      # quiet "switch is off" skip below is what a staging-mode run gets.
       - name: Skip a commit that would roll a service back
         id: head
         shell: bash

@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
-# Runs the "runtime-platform" lines exactly as .depot/workflows/deliver.yml ships them
+# Runs the "runtime-platform" lines exactly as .github/workflows/deliver.yml ships them
 # (between their BEGIN/END markers) against fixtures, and checks that the
 # registered revision's runtimePlatform.cpuArchitecture follows the image:
 #
 # - an amd64 image on a live ARM64 revision registers X86_64 (the 2026-11 move);
 # - an arm64 image (a release or rollback of a pre-move commit) registers ARM64;
-# - a multi-arch image (amd64,arm64) registers no runtimePlatform, so the task
-#   places on x86_64 and arm64 hosts alike;
+# - a multi-arch image (amd64,arm64) keeps the live revision's runtimePlatform
+#   untouched (X86_64, ARM64, or none): whoever moved the service owns the choice
+#   and a deliver must not undo it (Fargate with no runtimePlatform is X86_64);
 # - an image with no known architecture stops the deploy.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-workflow="$repo_root/.depot/workflows/deliver.yml"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
+# The live reusable workflow is the GitHub Actions one (callers use it). The .depot copy is
+# frozen by pi-deliver-staging-seed.sh, so it is not tested here.
+workflow="$repo_root/.github/workflows/deliver.yml"
 awk '/# BEGIN runtime-platform/{on=1} on{print} /# END runtime-platform/{on=0}' "$workflow" | sed -E 's/^ {12}//' >"$work/rp.sh"
 grep -q 'END runtime-platform' "$work/rp.sh" || { echo "FAIL: runtime-platform markers not found in $workflow"; exit 1; }
 
@@ -25,8 +28,8 @@ bad() { fail=$((fail + 1)); echo "FAIL $1"; }
 run_case() { # name, image arch, live cpuArchitecture, expect: X86_64|ARM64|none|stop
   local dir="$work/$1" rc=0 out
   mkdir -p "$dir"
-  jq -n --arg a "$3" '{family: "pi-odonofrio-staging", runtimePlatform: {cpuArchitecture: $a, operatingSystemFamily: "LINUX"},
-    containerDefinitions: [{name: "web", image: "x"}]}' >"$dir/pi-odonofrio-staging.json"
+  jq -n --arg a "$3" '{family: "pi-odonofrio-staging", containerDefinitions: [{name: "web", image: "x"}]}
+    | if $a == "none" then . else .runtimePlatform = {cpuArchitecture: $a, operatingSystemFamily: "LINUX"} end' >"$dir/pi-odonofrio-staging.json"
   out="$(IMAGES="$(jq -nc --arg a "$2" '[{repo: "pi-odonofrio/web", arch: $a}]')" workdir="$dir" family=pi-odonofrio-staging \
     bash -euo pipefail -c '. "$1"' _ "$work/rp.sh" 2>&1)" || rc=$?
   if test "$4" = "stop"; then
@@ -42,8 +45,9 @@ run_case() { # name, image arch, live cpuArchitecture, expect: X86_64|ARM64|none
 run_case amd64-image-on-arm64-revision amd64 ARM64 X86_64
 run_case amd64-image-on-x86-revision amd64 X86_64 X86_64
 run_case arm64-rollback-on-x86-revision arm64 X86_64 ARM64
-run_case multi-arch-on-x86-revision amd64,arm64 X86_64 none
-run_case multi-arch-on-arm64-revision amd64,arm64 ARM64 none
+run_case multi-arch-on-x86-revision amd64,arm64 X86_64 X86_64
+run_case multi-arch-on-arm64-revision amd64,arm64 ARM64 ARM64
+run_case multi-arch-on-unpinned-revision amd64,arm64 none none
 run_case unknown-arch-stops "" ARM64 stop
 run_case unsupported-arch-set-stops arm64,ppc64le X86_64 stop
 

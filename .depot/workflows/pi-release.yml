@@ -206,7 +206,7 @@ jobs:
     needs: mode
     permissions:
       contents: read
-    uses: Palmetto-Interactive-LLC/.github/.depot/workflows/pi-checks.yml@f6f5e870534b34718cc6540c4b673c25dde6ca44
+    uses: Palmetto-Interactive-LLC/.github/.depot/workflows/pi-checks.yml@63a85290f4c3541e1fd75ef517be4e924066412f
     with:
       mode: release
       stack: ${{ inputs.stack }}

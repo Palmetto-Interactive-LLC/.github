@@ -1,0 +1,47 @@
+# Native Membl workflow (v1). Live execution today is .github/workflows/ci.yml
+# (runs-on: membl) until MEMBL-421 lands and the control plane dispatches
+# Check Runs from this file. Keep job id `ci` so the required context stays
+# `CI / ci`.
+version: 1
+name: CI
+
+on:
+  pull_request: {}
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  policy: cancel-superseded-pr
+
+defaults:
+  compute:
+    intent: balanced
+    size: membl
+
+env:
+  CI: "1"
+
+jobs:
+  base-checks:
+    name: Base checks
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    compute:
+      intent: balanced
+      size: membl
+    steps:
+      - uses: checkout
+        with:
+          # Secret scan (gitleaks) reads the full history.
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Run make ci
+        run: make ci
+
+  # Required check name: CI / ci (gate aggregates base-checks; no soft skip).
+  ci:
+    type: gate
+    needs: [base-checks]

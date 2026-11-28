@@ -882,16 +882,23 @@ jobs:
             # BEGIN live-revision
             # Copy the revision the service runs, never the family's newest
             # revision. The newest can be a migration-only or one-off revision
-            # (DATABASE_MIGRATOR_URL, a one-off token), and copying it would put
-            # that secret into the serving container (2026-10-30).
+            # carrying a migrator secret, and copying it would put that secret
+            # into the serving container.
             # Tested by scripts/tests/pi-deliver-secret-guard.sh.
             # shellcheck disable=SC2016
             base="$(aws ecs describe-services --cluster "$CLUSTER" --services "$family" \
               --query 'services[?status==`ACTIVE`] | [0].taskDefinition' --output text)"
-            case "$base" in
-              arn:aws:ecs:*:task-definition/"$family":*) echo "Base revision for ${family}: ${base##*/} (the service's live revision)" ;;
-              *) echo "::error::Could not read the live task definition of service ${family} (got '${base}'). Not deploying from a guess."; exit 1 ;;
-            esac
+            rev="${base##*:}"
+            prefix="${base%%:task-definition/*}"
+            if [[ "$base" != *$'\n'* ]] \
+              && [[ "$prefix" =~ ^arn:aws:ecs:[a-z0-9-]+:[0-9]{12}$ ]] \
+              && [[ "$rev" =~ ^[0-9]+$ ]] \
+              && test "$base" = "${prefix}:task-definition/${family}:${rev}"; then
+              echo "Base revision for ${family}: ${base##*/} (the service's live revision)"
+            else
+              echo "::error::Could not read the live task definition of service ${family} (got '${base}'). Not deploying from a guess."
+              exit 1
+            fi
             # END live-revision
             aws ecs describe-task-definition --task-definition "$base" --query taskDefinition --output json \
               | jq --argjson imgs "$IMAGES" --arg rel "$VERSION" '
@@ -931,24 +938,47 @@ jobs:
             # END runtime-platform
             test "$swapped" -gt 0 || { echo "::error::No container in ${family} matched an image in this build (containers: $(jq -r '[.containerDefinitions[].name] | join(", ")' "$workdir/${family}.json"))."; exit 1; }
             # BEGIN secret-guard
-            # A serving revision may hold only the secrets pi-platform declares
-            # for this service (ECS_SERVING_SECRETS), and never a migrator one.
+            # A serving revision may hold only the secrets declared for this
+            # service (ECS_SERVING_SECRETS), and never a migrator secret in
+            # either .name or .valueFrom (case-insensitive token boundary).
             # Tested by scripts/tests/pi-deliver-secret-guard.sh.
-            names="$(jq -r '[.containerDefinitions[].secrets[]?.name] | unique | .[]' "$workdir/${family}.json")"
-            migrator="$(grep -E '(^|_)MIGRATOR(_|$)' <<<"$names" | paste -sd, - || true)"
+            jq -e '
+              (.containerDefinitions | type == "array" and length > 0)
+              and all(.containerDefinitions[];
+                ((.secrets // []) | type == "array")
+                and all((.secrets // [])[];
+                  type == "object"
+                  and ((.name | type) == "string") and (.name != "")
+                  and ((.valueFrom | type) == "string") and (.valueFrom != "")
+                )
+              )' "$workdir/${family}.json" >/dev/null \
+              || { echo "::error::${family}: malformed containerDefinitions or secrets in serving task definition."; exit 1; }
+            migrator="$(jq -r '
+              def is_migrator: test("(^|[:/_.-])migrator($|[:/_.-])"; "i");
+              [
+                .containerDefinitions[]
+                | (.secrets // [])[]
+                | {name: .name, bad_name: (.name | is_migrator), bad_val: (.valueFrom | is_migrator)}
+                | select(.bad_name or .bad_val)
+                | if .bad_name and .bad_val then "\(.name) (name and valueFrom)"
+                  elif .bad_name then "\(.name) (name)"
+                  else "\(.name) (valueFrom)"
+                  end
+              ] | unique | join(", ")' "$workdir/${family}.json")"
             if test -n "$migrator"; then
-              echo "::error::${family}: the serving revision would carry ${migrator}. Migrator secrets belong only in the migration-only revision. Move the service to a revision without them, then deploy again."
+              echo "::error::${family}: the serving revision would carry migrator secret(s): ${migrator}. Migrator secrets belong only in the migration-only revision. Move the service to a revision without them, then deploy again."
               exit 1
             fi
+            names="$(jq -r '[.containerDefinitions[].secrets[]?.name] | unique | .[]' "$workdir/${family}.json")"
             if test -n "${SERVING_SECRETS:-}"; then
               declared="$(jq -r --arg f "$family" 'if has($f) then .[$f][] else "<undeclared-service>" end' <<<"$SERVING_SECRETS")"
               if grep -qx '<undeclared-service>' <<<"$declared"; then
-                echo "::error::${family} is not in ECS_SERVING_SECRETS. pi-platform declares the secrets of every service it deploys."
+                echo "::error::${family} is not in ECS_SERVING_SECRETS. Every deployed service must declare its allowed serving secrets."
                 exit 1
               fi
               extra="$(comm -23 <(grep -v '^$' <<<"$names" | sort -u) <(grep -v '^$' <<<"$declared" | sort -u) | paste -sd, - || true)"
               if test -n "$extra"; then
-                echo "::error::${family}: the serving revision would carry secrets pi-platform does not declare for it: ${extra}. Declare them in pi-platform, or move the service to a revision without them."
+                echo "::error::${family}: the serving revision would carry undeclared secrets: ${extra}. Declare them in ECS_SERVING_SECRETS, or move the service to a revision without them."
                 exit 1
               fi
               echo "Secret guard: ${family} serves only declared secrets ($(grep -c . <<<"$names" || true))."
@@ -964,6 +994,7 @@ jobs:
           echo "deploy=${deploy}" >> "$GITHUB_OUTPUT"
 
       - name: Run pre-deploy migration
+        id: migrate
         if: inputs.migrate-command != '' && steps.recheck.outputs.skip != 'true'
         shell: bash
         env:
@@ -974,16 +1005,22 @@ jobs:
           family="$(jq -r '.[0].family' <<<"$DEPLOY")"
           arn="$(jq -r '.[0].arn' <<<"$DEPLOY")"
 
-          # Optional migration-only Secrets Manager references, as a separate
-          # revision of the same family. The services keep the first revision.
-          # That revision is deregistered when this step ends, whatever the
-          # outcome, so it can never be copied or run again (2026-10-30).
+          # Optional migration-only secret references, as a separate revision
+          # of the same family (deploy roles scope ecs:RunTask to the service's
+          # own family). The services keep the first revision. That revision is
+          # deregistered on step exit and by the always() cleanup step below so
+          # cancellation or timeout never leaves a migration revision ACTIVE.
           migrate_rev=""
+          migrate_rev_file="$workdir/migrate-rev"
+          rm -f "$migrate_rev_file"
           cleanup() {
             if test -n "$migrate_rev"; then
-              aws ecs deregister-task-definition --task-definition "$migrate_rev" >/dev/null \
-                && echo "Deregistered migration-only revision ${migrate_rev##*/}" \
-                || echo "::warning::Could not deregister ${migrate_rev##*/}; do it by hand."
+              if aws ecs deregister-task-definition --task-definition "$migrate_rev" >/dev/null; then
+                rm -f "$migrate_rev_file" "$workdir/${family}-migrate.json"
+                echo "Deregistered migration-only revision ${migrate_rev##*/}"
+              else
+                echo "::warning::Could not deregister ${migrate_rev##*/} in step exit trap; always() cleanup will retry."
+              fi
             fi
           }
           trap cleanup EXIT
@@ -998,6 +1035,7 @@ jobs:
             arn="$(aws ecs register-task-definition --cli-input-json "file://$workdir/${family}-migrate.json" \
               --query taskDefinition.taskDefinitionArn --output text)"
             migrate_rev="$arn"
+            printf '%s\n' "$migrate_rev" > "$migrate_rev_file"
             echo "Registered migration-only revision ${arn}"
           fi
 
@@ -1064,6 +1102,38 @@ jobs:
           group="$(jq -r --arg name "$MAIN_CONTAINER" '.containerDefinitions[] | select(.name == $name) | .logConfiguration.options["awslogs-group"] // ""' "$workdir/${family}.json")"
           echo "Migration exit code: ${code} (${reason}). Logs: ${group:-n/a} (stream prefix ecs/${MAIN_CONTAINER}/${task##*/})"
           test "$code" = "0" || { echo "::error::Migration failed with exit code ${code}. ${reason}"; exit 1; }
+
+      - name: Deregister migration-only task definition
+        if: always() && inputs.migrate-command != '' && steps.recheck.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # BEGIN migrate-cleanup
+          # Safety net for cancellation, timeout, or exit-trap failure: if a
+          # migration-only revision was recorded and not yet deregistered,
+          # deregister it now so it can never remain ACTIVE in the family.
+          # Tested by scripts/tests/pi-deliver-secret-guard.sh.
+          migrate_rev_file="$RUNNER_TEMP/taskdefs/migrate-rev"
+          if test ! -s "$migrate_rev_file"; then
+            exit 0
+          fi
+          migrate_rev="$(cat "$migrate_rev_file")"
+          if test -n "$migrate_rev"; then
+            status="$(aws ecs describe-task-definition --task-definition "$migrate_rev" --query taskDefinition.status --output text 2>/dev/null || echo "")"
+            if test "$status" = "INACTIVE"; then
+              rm -f "$migrate_rev_file" "$RUNNER_TEMP"/taskdefs/*-migrate.json
+              echo "Migration-only revision ${migrate_rev##*/} is already INACTIVE."
+              exit 0
+            fi
+            if aws ecs deregister-task-definition --task-definition "$migrate_rev" >/dev/null; then
+              rm -f "$migrate_rev_file" "$RUNNER_TEMP"/taskdefs/*-migrate.json
+              echo "Deregistered migration-only revision ${migrate_rev##*/}"
+            else
+              echo "::error::Could not deregister migration-only revision ${migrate_rev##*/}; deregister it immediately."
+              exit 1
+            fi
+          fi
+          # END migrate-cleanup
 
       - name: Roll services and wait for a stable deployment
         if: steps.recheck.outputs.skip != 'true'
